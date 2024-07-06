@@ -1,5 +1,5 @@
 {
-  "name": "slotseek",
+  "name": "@d3or/slotseek",
   "version": "1.0.0",
   "description": "A library for finding the storage slots on an ERC20 token for balances and approvals, which can be used to mock the balances and approvals of an address when estimating gas costs of transactions that would fail if the address did not have the required balance or approval",
   "main": "dist/index.js",
@@ -48,7 +48,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/d3or/slotseek.git"
+    "url": "git+https://github.com/d3or/slotseek.git"
   },
   "bugs": {
     "url": "https://github.com/d3or/slotseek/issues"
