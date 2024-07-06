@@ -1,0 +1,29 @@
+name: Run Tests
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Use Node.js 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        env:
+          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+        run: npm test

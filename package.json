@@ -1,0 +1,57 @@
+{
+  "name": "slotseek",
+  "version": "1.0.0",
+  "description": "A library for finding the storage slots on an ERC20 token for balances and approvals, which can be used to mock the balances and approvals of an address when estimating gas costs of transactions that would fail if the address did not have the required balance or approval",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "setupFiles": [
+      "<rootDir>/jest.setup.ts"
+    ],
+    "testMatch": [
+      "<rootDir>/tests/**/*.test.ts"
+    ]
+  },
+  "keywords": [
+    "ethereum",
+    "erc20"
+  ],
+  "author": "d3or",
+  "license": "MIT",
+  "dependencies": {
+    "ethers": "^5.7.2"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "dotenv": "^16.4.5",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.0",
+    "typescript": "^4.9.5"
+  },
+  "peerDependencies": {
+    "ethers": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/d3or/slotseek.git"
+  },
+  "bugs": {
+    "url": "https://github.com/d3or/slotseek/issues"
+  },
+  "homepage": "https://github.com/d3or/slotseek#readme"
+}
