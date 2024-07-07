@@ -1,5 +1,9 @@
 # slotseek
 
+<a href="https://www.npmjs.com/package/@d3or/slotseek/"><img src="https://img.shields.io/npm/v/@d3or/slotseek.svg" alt="NPM version"></a>
+<a href="https://twitter.com/intent/follow?screen_name=deor"><img src="https://img.shields.io/twitter/follow/deor.svg?style=social&label=Follow%20@deor" alt="Follow on Twitter" /></a>
+<a href="https://github.com/d3or/slotseek/actions/workflows/test.yml"><img src="https://github.com/d3or/slotseek/actions/workflows/test.yml/badge.svg" alt="Build Status" /></a>
+
 slotseek is a javascript library that assists with finding the storage slots for the `balanceOf` and `allowance` mappings in an ERC20 token contract. It also provides a way to generate mock data that can be used to override the state of a contract in an `eth_call` or `eth_estimateGas` call.
 
 The main use case for this library is to estimate gas costs of transactions that would fail if the address did not have the required balance or approval.
