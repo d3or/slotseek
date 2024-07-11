@@ -16,7 +16,7 @@ describe("generateMockApprovalData", () => {
     const ownerAddress = "0x0000c3Caa36E2d9A8CD5269C976eDe05018f0000";
     const spenderAddress = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
     const mockApprovalAmount = "1000000";
-    const maxSlots = 100;
+    const maxSlots = 30;
 
     const data = await generateMockApprovalData(baseProvider, {
       tokenAddress,
@@ -38,7 +38,7 @@ describe("generateMockApprovalData", () => {
     const spenderAddress = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
     const mockAddress = ethers.Wallet.createRandom().address;
     const mockApprovalAmount = "1000000";
-    const maxSlots = 100;
+    const maxSlots = 30;
 
     const data = await generateMockApprovalData(ethProvider, {
       tokenAddress,

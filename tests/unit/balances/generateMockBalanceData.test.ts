@@ -15,7 +15,7 @@ describe("generateMockBalanceData", () => {
     const holderAddress = "0x0000c3Caa36E2d9A8CD5269C976eDe05018f0000";
     const mockAddress = "0x3e34b27a9bf37D8424e1a58aC7fc4D06914B76B9";
     const mockBalanceAmount = "9600000";
-    const maxSlots = 100;
+    const maxSlots = 30;
 
     const data = await generateMockBalanceData(baseProvider, {
       tokenAddress,
@@ -34,7 +34,7 @@ describe("generateMockBalanceData", () => {
     const holderAddress = "0x0000c3Caa36E2d9A8CD5269C976eDe05018f0000";
     const mockAddress = ethers.Wallet.createRandom().address;
     const mockBalanceAmount = "1000000";
-    const maxSlots = 100;
+    const maxSlots = 30;
 
     const data = await generateMockBalanceData(ethProvider, {
       tokenAddress,
