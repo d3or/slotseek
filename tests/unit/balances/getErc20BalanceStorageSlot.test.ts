@@ -13,7 +13,7 @@ describe("getErc20BalanceStorageSlot", () => {
   it("should return the slot and balance for the holder", async () => {
     const tokenAddress = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
     const holderAddress = "0x0000c3Caa36E2d9A8CD5269C976eDe05018f0000";
-    const maxSlots = 100;
+    const maxSlots = 30;
     const { slot, balance, isVyper } = await getErc20BalanceStorageSlot(
       baseProvider,
       tokenAddress,
@@ -30,7 +30,7 @@ describe("getErc20BalanceStorageSlot", () => {
   it("[vyper] should return the slot and balance for the holder", async () => {
     const tokenAddress = "0xD533a949740bb3306d119CC777fa900bA034cd52";
     const holderAddress = "0x0000c3Caa36E2d9A8CD5269C976eDe05018f0000";
-    const maxSlots = 100;
+    const maxSlots = 30;
     const { slot, balance, isVyper } = await getErc20BalanceStorageSlot(
       ethProvider,
       tokenAddress,

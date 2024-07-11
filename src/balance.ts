@@ -18,7 +18,7 @@ export const generateMockBalanceData = async (
     holderAddress,
     mockAddress,
     mockBalanceAmount,
-    maxSlots = 100,
+    maxSlots = 30,
   }: {
     tokenAddress: string;
     holderAddress: string;
