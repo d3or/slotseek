@@ -32,7 +32,7 @@ yarn add @d3or/slotseek
 
 ## TODO
 
-- [ ] Add caching options to reduce the number of RPC calls and reduce the time it takes to find the same slot again
+- [X] Add caching options to reduce the number of RPC calls and reduce the time it takes to find the same slot again
 
 ## Example of overriding a users balance via eth_call
 
