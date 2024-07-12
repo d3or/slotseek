@@ -1,4 +1,5 @@
 import { ethers } from "ethers";
+import { approvalCache } from "./cache";
 
 /**
  * Generate mock approval data for a given ERC20 token
@@ -114,6 +115,27 @@ export const getErc20ApprovalStorageSlot = async (
   slotHash: string;
   isVyper: boolean;
 }> => {
+  // check the cache
+  const cachedValue = approvalCache.get(erc20Address.toLowerCase());
+  if (cachedValue) {
+    if (cachedValue.isVyper) {
+      const { vyperSlotHash } = calculateApprovalVyperStorageSlot(ownerAddress, spenderAddress, cachedValue.slot)
+      return {
+        slot: ethers.BigNumber.from(cachedValue.slot).toHexString(),
+        slotHash: vyperSlotHash,
+        isVyper: true,
+      };
+
+    } else {
+      const { slotHash } = calculateApprovalSolidityStorageSlot(ownerAddress, spenderAddress, cachedValue.slot)
+      return {
+        slot: ethers.BigNumber.from(cachedValue.slot).toHexString(),
+        slotHash: slotHash,
+        isVyper: false,
+      }
+    }
+  }
+
   // Get the approval for the spender, that we can use to find the slot
   let approval = await getErc20Approval(
     provider,
@@ -124,50 +146,36 @@ export const getErc20ApprovalStorageSlot = async (
 
   if (approval.gt(0)) {
     for (let i = 0; i < maxSlots; i++) {
-      // Calculate the slot hash, using the owner address and the slot index
-      const slot = ethers.utils.keccak256(
-        ethers.utils.defaultAbiCoder.encode(
-          ["address", "uint256"],
-          [ownerAddress, i]
-        )
-      );
-      // Calculate the storage slot, using the spender address and the slot hash
-      const storageSlot = ethers.utils.keccak256(
-        ethers.utils.defaultAbiCoder.encode(
-          ["address", "bytes32"],
-          [spenderAddress, slot]
-        )
-      );
+      const { storageSlot, slotHash } = calculateApprovalSolidityStorageSlot(ownerAddress, spenderAddress, i)
       // Get the value at the storage slot
       const storageValue = await provider.getStorageAt(erc20Address, storageSlot);
       // If the value at the storage slot is equal to the approval, return the slot as we have found the correct slot for approvals
       if (ethers.BigNumber.from(storageValue).eq(approval)) {
+        approvalCache.set(erc20Address.toLowerCase(), {
+          slot: i,
+          isVyper: false,
+          ts: Date.now()
+        });
         return {
           slot: ethers.BigNumber.from(i).toHexString(),
-          slotHash: slot,
+          slotHash: slotHash,
           isVyper: false,
         };
       }
 
-      // check via vyper storage layout, which uses keccak256(abi.encode(slot, address(this))) instead of keccak256(abi.encode(address(this), slot))
-      const vyperSlotHash = ethers.utils.keccak256(
-        ethers.utils.defaultAbiCoder.encode(
-          ["uint256", "address"],
-          [i, ownerAddress]
-        )
-      );
-
-      const vyperStorageSlot = ethers.utils.keccak256(
-        ethers.utils.defaultAbiCoder.encode(
-          ["bytes32", "address"],
-          [vyperSlotHash, spenderAddress]
-        )
-      );
+      const { vyperStorageSlot, vyperSlotHash } = calculateApprovalVyperStorageSlot(ownerAddress, spenderAddress, i)
       const vyperStorageValue = await provider.getStorageAt(
         erc20Address,
         vyperStorageSlot
       );
+
       if (ethers.BigNumber.from(vyperStorageValue).eq(approval)) {
+        approvalCache.set(erc20Address.toLowerCase(), {
+          slot: i,
+          isVyper: false,
+          ts: Date.now()
+        });
+
         return {
           slot: ethers.BigNumber.from(i).toHexString(),
           slotHash: vyperSlotHash,
@@ -179,73 +187,93 @@ export const getErc20ApprovalStorageSlot = async (
       throw new Error("Approval does not exist");
   }
 
-
   if (useFallbackSlot) {
     // if useFallBackSlot = true, then we are just going to assume the slot is at the slot which is most common for erc20 tokens. for approvals, this is slot #10
 
     const fallbackSlot = 10;
-    // check if contract is solidity/vyper, so we know which storage slot generation method to use
-    // TODO: add this above check, currently not sure of how to programatically check if a contract is a vyper contract.
-    const isVyper = false;
-    if (isVyper) {
-      const vyperSlotHash = ethers.utils.keccak256(
-        ethers.utils.defaultAbiCoder.encode(
-          ["uint256", "address"],
-          [fallbackSlot, ownerAddress]
-        )
-      );
+    // check solidity, then check vyper.
+    // (dont have an easy way to check if a contract is solidity/vyper)
+    const { storageSlot, slotHash } = calculateApprovalSolidityStorageSlot(ownerAddress, spenderAddress, fallbackSlot)
+    // Get the value at the storage slot
+    const storageValue = await provider.getStorageAt(erc20Address, storageSlot);
+    // If the value at the storage slot is equal to the approval, return the slot as we have found the correct slot for approvals
+    if (ethers.BigNumber.from(storageValue).eq(approval)) {
+      approvalCache.set(erc20Address.toLowerCase(), {
+        slot: fallbackSlot,
+        isVyper: false,
+        ts: Date.now()
+      });
 
-      const vyperStorageSlot = ethers.utils.keccak256(
-        ethers.utils.defaultAbiCoder.encode(
-          ["bytes32", "address"],
-          [vyperSlotHash, spenderAddress]
-        )
-      );
-      const vyperStorageValue = await provider.getStorageAt(
-        erc20Address,
-        vyperStorageSlot
-      );
-      if (ethers.BigNumber.from(vyperStorageValue).eq(approval)) {
-        return {
-          slot: ethers.BigNumber.from(fallbackSlot).toHexString(),
-          slotHash: vyperSlotHash,
-          isVyper: true,
-        };
-      }
-    } else {
-
-      const slot = ethers.utils.keccak256(
-        ethers.utils.defaultAbiCoder.encode(
-          ["address", "uint256"],
-          [ownerAddress, fallbackSlot]
-        )
-      );
-      // Calculate the storage slot, using the spender address and the slot hash
-      const storageSlot = ethers.utils.keccak256(
-        ethers.utils.defaultAbiCoder.encode(
-          ["address", "bytes32"],
-          [spenderAddress, slot]
-        )
-      );
-      // Get the value at the storage slot
-      const storageValue = await provider.getStorageAt(erc20Address, storageSlot);
-      // If the value at the storage slot is equal to the approval, return the slot as we have found the correct slot for approvals
-      if (ethers.BigNumber.from(storageValue).eq(approval)) {
-        return {
-          slot: ethers.BigNumber.from(fallbackSlot).toHexString(),
-          slotHash: slot,
-          isVyper: false,
-        };
-
-      }
-
+      return {
+        slot: ethers.BigNumber.from(fallbackSlot).toHexString(),
+        slotHash: slotHash,
+        isVyper: false,
+      };
     }
 
+    // check vyper
+    const { vyperStorageSlot, vyperSlotHash } = calculateApprovalVyperStorageSlot(ownerAddress, spenderAddress, fallbackSlot)
+    const vyperStorageValue = await provider.getStorageAt(
+      erc20Address,
+      vyperStorageSlot
+    );
+    if (ethers.BigNumber.from(vyperStorageValue).eq(approval)) {
+      approvalCache.set(erc20Address.toLowerCase(), {
+        slot: fallbackSlot,
+        isVyper: true,
+        ts: Date.now()
+      });
+
+      return {
+        slot: ethers.BigNumber.from(fallbackSlot).toHexString(),
+        slotHash: vyperSlotHash,
+        isVyper: true,
+      };
+    }
   }
 
   throw new Error("Unable to find approval slot");
 };
 
+// Generates approval solidity storage slot data
+const calculateApprovalSolidityStorageSlot = (ownerAddress: string, spenderAddress: string, slotNumber: number) => {
+
+  // Calculate the slot hash, using the owner address and the slot index
+  const slotHash = ethers.utils.keccak256(
+    ethers.utils.defaultAbiCoder.encode(
+      ["address", "uint256"],
+      [ownerAddress, slotNumber]
+    )
+  );
+  // Calculate the storage slot, using the spender address and the slot hash
+  const storageSlot = ethers.utils.keccak256(
+    ethers.utils.defaultAbiCoder.encode(
+      ["address", "bytes32"],
+      [spenderAddress, slotHash]
+    )
+  );
+  return { storageSlot, slotHash }
+}
+
+// Generates approval vyper storage slot data
+const calculateApprovalVyperStorageSlot = (ownerAddress: string, spenderAddress: string, slotNumber: number) => {
+  // create via vyper storage layout, which uses keccak256(abi.encode(slot, address(this))) instead of keccak256(abi.encode(address(this), slot))
+  const vyperSlotHash = ethers.utils.keccak256(
+    ethers.utils.defaultAbiCoder.encode(
+      ["uint256", "address"],
+      [slotNumber, ownerAddress]
+    )
+  );
+
+  const vyperStorageSlot = ethers.utils.keccak256(
+    ethers.utils.defaultAbiCoder.encode(
+      ["bytes32", "address"],
+      [vyperSlotHash, spenderAddress]
+    )
+  );
+
+  return { vyperStorageSlot, vyperSlotHash }
+}
 /**
  * Get the approval for a given ERC20 token
  * @param provider - The JsonRpcProvider instance

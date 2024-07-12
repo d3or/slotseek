@@ -1,3 +1,4 @@
+import { approvalCache, balanceCache } from './cache';
 import {
   generateMockApprovalData,
   getErc20Approval,
@@ -10,6 +11,8 @@ import {
 } from "./balance";
 
 export {
+  approvalCache,
+  balanceCache,
   generateMockApprovalData,
   generateMockBalanceData,
   getErc20ApprovalStorageSlot,
