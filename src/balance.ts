@@ -1,4 +1,5 @@
 import { ethers } from "ethers";
+import { balanceCache } from "./cache";
 
 /**
  * Generate mock data for a given ERC20 token balance
@@ -87,12 +88,37 @@ export const getErc20BalanceStorageSlot = async (
   provider: ethers.providers.JsonRpcProvider,
   erc20Address: string,
   holderAddress: string,
-  maxSlots = 100
+  maxSlots = 30
 ): Promise<{
   slot: string;
   balance: ethers.BigNumber;
   isVyper: boolean;
 }> => {
+  // check the cache
+  const cachedValue = balanceCache.get(erc20Address.toLowerCase());
+  if (cachedValue) {
+    if (cachedValue.isVyper) {
+      const { vyperSlotHash } = calculateApprovalVyperStorageSlot(holderAddress, cachedValue.slot)
+      const vyperBalance = await provider.getStorageAt(
+        erc20Address,
+        vyperSlotHash
+      );
+      return {
+        slot: ethers.BigNumber.from(cachedValue.slot).toHexString(),
+        balance: ethers.BigNumber.from(vyperBalance),
+        isVyper: true,
+      };
+    } else {
+      const { slotHash } = calculateApprovalSolidityStorageSlot(holderAddress, cachedValue.slot);
+      const balance = await provider.getStorageAt(erc20Address, slotHash);
+      return {
+        slot: ethers.BigNumber.from(cachedValue.slot).toHexString(),
+        balance: ethers.BigNumber.from(balance),
+        isVyper: false,
+      }
+    }
+  }
+
   // Get the balance of the holder, that we can use to find the slot
   const userBalance = await getErc20Balance(
     provider,
@@ -107,12 +133,16 @@ export const getErc20BalanceStorageSlot = async (
   // For each slot, we compute the storage slot key [holderAddress, slot index] and get the value at that storage slot
   // If the value at the storage slot is equal to the balance, return the slot as we have found the correct slot for balances
   for (let i = 0; i < maxSlots; i++) {
-    const slot = ethers.utils.solidityKeccak256(
-      ["uint256", "uint256"],
-      [holderAddress, i]
-    );
-    const balance = await provider.getStorageAt(erc20Address, slot);
+    const { slotHash } = calculateApprovalSolidityStorageSlot(holderAddress, i);
+    const balance = await provider.getStorageAt(erc20Address, slotHash);
+
     if (ethers.BigNumber.from(balance).eq(userBalance)) {
+      balanceCache.set(erc20Address.toLowerCase(), {
+        slot: i,
+        isVyper: false,
+        ts: Date.now()
+      })
+
       return {
         slot: ethers.BigNumber.from(i).toHexString(),
         balance: ethers.BigNumber.from(balance),
@@ -120,18 +150,19 @@ export const getErc20BalanceStorageSlot = async (
       };
     }
 
-    // check via vyper storage layout, which uses keccak256(abi.encode(slot, address(this))) instead of keccak256(abi.encode(address(this), slot))
-    const vyperSlotHash = ethers.utils.keccak256(
-      ethers.utils.defaultAbiCoder.encode(
-        ["uint256", "address"],
-        [i, holderAddress]
-      )
-    );
+    const { vyperSlotHash } = calculateApprovalVyperStorageSlot(holderAddress, i)
     const vyperBalance = await provider.getStorageAt(
       erc20Address,
       vyperSlotHash
     );
+
     if (ethers.BigNumber.from(vyperBalance).eq(userBalance)) {
+      balanceCache.set(erc20Address.toLowerCase(), {
+        slot: i,
+        isVyper: true,
+        ts: Date.now()
+      })
+
       return {
         slot: ethers.BigNumber.from(i).toHexString(),
         balance: ethers.BigNumber.from(vyperBalance),
@@ -141,6 +172,26 @@ export const getErc20BalanceStorageSlot = async (
   }
   throw new Error("Unable to find balance slot");
 };
+
+
+const calculateApprovalSolidityStorageSlot = (holderAddress: string, slotNumber: number) => {
+  const slotHash = ethers.utils.solidityKeccak256(
+    ["uint256", "uint256"],
+    [holderAddress, slotNumber]
+  );
+  return { slotHash }
+}
+
+const calculateApprovalVyperStorageSlot = (holderAddress: string, slotNumber: number) => {
+  // create hash via vyper storage layout, which uses keccak256(abi.encode(slot, address(this))) instead of keccak256(abi.encode(address(this), slot))
+  const vyperSlotHash = ethers.utils.keccak256(
+    ethers.utils.defaultAbiCoder.encode(
+      ["uint256", "address"],
+      [slotNumber, holderAddress]
+    )
+  );
+  return { vyperSlotHash }
+}
 
 /**
  * Get the balance of a given address for a given ERC20 token
