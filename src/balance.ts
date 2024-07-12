@@ -98,7 +98,7 @@ export const getErc20BalanceStorageSlot = async (
   const cachedValue = balanceCache.get(erc20Address.toLowerCase());
   if (cachedValue) {
     if (cachedValue.isVyper) {
-      const { vyperSlotHash } = calculateApprovalVyperStorageSlot(holderAddress, cachedValue.slot)
+      const { vyperSlotHash } = calculateBalanceVyperStorageSlot(holderAddress, cachedValue.slot)
       const vyperBalance = await provider.getStorageAt(
         erc20Address,
         vyperSlotHash
@@ -109,7 +109,7 @@ export const getErc20BalanceStorageSlot = async (
         isVyper: true,
       };
     } else {
-      const { slotHash } = calculateApprovalSolidityStorageSlot(holderAddress, cachedValue.slot);
+      const { slotHash } = calculateBalanceSolidityStorageSlot(holderAddress, cachedValue.slot);
       const balance = await provider.getStorageAt(erc20Address, slotHash);
       return {
         slot: ethers.BigNumber.from(cachedValue.slot).toHexString(),
@@ -133,7 +133,7 @@ export const getErc20BalanceStorageSlot = async (
   // For each slot, we compute the storage slot key [holderAddress, slot index] and get the value at that storage slot
   // If the value at the storage slot is equal to the balance, return the slot as we have found the correct slot for balances
   for (let i = 0; i < maxSlots; i++) {
-    const { slotHash } = calculateApprovalSolidityStorageSlot(holderAddress, i);
+    const { slotHash } = calculateBalanceSolidityStorageSlot(holderAddress, i);
     const balance = await provider.getStorageAt(erc20Address, slotHash);
 
     if (ethers.BigNumber.from(balance).eq(userBalance)) {
@@ -150,7 +150,7 @@ export const getErc20BalanceStorageSlot = async (
       };
     }
 
-    const { vyperSlotHash } = calculateApprovalVyperStorageSlot(holderAddress, i)
+    const { vyperSlotHash } = calculateBalanceVyperStorageSlot(holderAddress, i)
     const vyperBalance = await provider.getStorageAt(
       erc20Address,
       vyperSlotHash
@@ -174,7 +174,7 @@ export const getErc20BalanceStorageSlot = async (
 };
 
 
-const calculateApprovalSolidityStorageSlot = (holderAddress: string, slotNumber: number) => {
+const calculateBalanceSolidityStorageSlot = (holderAddress: string, slotNumber: number) => {
   const slotHash = ethers.utils.solidityKeccak256(
     ["uint256", "uint256"],
     [holderAddress, slotNumber]
@@ -182,7 +182,7 @@ const calculateApprovalSolidityStorageSlot = (holderAddress: string, slotNumber:
   return { slotHash }
 }
 
-const calculateApprovalVyperStorageSlot = (holderAddress: string, slotNumber: number) => {
+const calculateBalanceVyperStorageSlot = (holderAddress: string, slotNumber: number) => {
   // create hash via vyper storage layout, which uses keccak256(abi.encode(slot, address(this))) instead of keccak256(abi.encode(address(this), slot))
   const vyperSlotHash = ethers.utils.keccak256(
     ethers.utils.defaultAbiCoder.encode(
