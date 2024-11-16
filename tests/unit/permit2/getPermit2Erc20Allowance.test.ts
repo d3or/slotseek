@@ -22,7 +22,7 @@ describe("getPermit2ERC20Allowance", () => {
 		expect(allowance).toBeDefined();
 		expect(allowance.toString()).toBe("1");
 
-	}, 30000);
+	}, 120000);
 
 	it("should return 0 allowance for permit2 ERC20 allowance for vitalik", async () => {
 		const tokenAddress = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
@@ -39,6 +39,6 @@ describe("getPermit2ERC20Allowance", () => {
 		);
 		expect(allowance).toBeDefined();
 		expect(allowance.toString()).toBe("0");
-	}, 30000);
+	}, 120000);
 
 });

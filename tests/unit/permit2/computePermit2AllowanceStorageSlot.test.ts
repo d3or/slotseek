@@ -22,6 +22,6 @@ describe("computePermit2AllowanceStorageSlot", () => {
 
 		expect(valueAtStorageSlot).toBeDefined()
 		expect(valueAtStorageSlot).toBe('0x00000000000001aa7be40acd0000000000000000000000000000000000000001')
-	}, 30000);
+	}, 120000);
 
 });

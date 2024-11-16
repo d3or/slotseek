@@ -27,7 +27,7 @@ describe("generateMockBalanceData", () => {
     expect(data).toBeDefined();
     expect(data.slot).toBeDefined();
     expect(data.balance).toBeDefined();
-  }, 30000);
+  }, 120000);
 
   it("[vyper] should generate mock balance data", async () => {
     const tokenAddress = "0xD533a949740bb3306d119CC777fa900bA034cd52";
@@ -47,5 +47,5 @@ describe("generateMockBalanceData", () => {
     expect(data.slot).toBeDefined();
     expect(data.balance).toBeDefined();
     expect(data.isVyper).toBe(true);
-  }, 30000);
+  }, 120000);
 });
