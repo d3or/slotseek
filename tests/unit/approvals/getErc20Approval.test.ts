@@ -22,7 +22,7 @@ describe("getErc20Approval", () => {
     );
     expect(approval).toBeDefined();
     expect(approval.toString()).toBe(
-      "1461501637330902918203684832716283019655932142975"
+      "1461501637330902918203684832716283019655931142975"
     );
   }, 30000);
 

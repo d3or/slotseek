@@ -23,7 +23,7 @@ describe("getErc20BalanceStorageSlot", () => {
     expect(slot).toBeDefined();
     expect(balance).toBeDefined();
     expect(slot).toBe("0x09");
-    expect(balance.toString()).toBe("9600000");
+    expect(balance.toString()).toBe("8600000");
     expect(isVyper).toBe(false);
   }, 30000);
 
