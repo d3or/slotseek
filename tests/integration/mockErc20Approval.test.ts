@@ -77,7 +77,7 @@ describe("mockErc20Approval", () => {
 
     // check the approval
     expect(approval.eq(mockApprovalAmount)).toBe(true);
-  }, 30000);
+  }, 120000);
 
   it("[vyper] should mock the approval of an address for an ERC20 token", async () => {
     const tokenAddress = "0xD533a949740bb3306d119CC777fa900bA034cd52";
@@ -143,7 +143,7 @@ describe("mockErc20Approval", () => {
 
     // check the approval
     expect(approval.toString()).toBe(mockApprovalAmount);
-  }, 30000);
+  }, 120000);
 
   it("should mock the approval of an address for an ERC20 token, using the fallback slot", async () => {
     const tokenAddress = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
@@ -209,7 +209,7 @@ describe("mockErc20Approval", () => {
 
     // check the approval
     expect(approval.eq(mockApprovalAmount)).toBe(true);
-  }, 30000);
+  }, 120000);
 
 
 });

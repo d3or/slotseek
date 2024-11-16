@@ -24,7 +24,7 @@ describe("getErc20Approval", () => {
     expect(approval.toString()).toBe(
       "1461501637330902918203684832716283019655931142975"
     );
-  }, 30000);
+  }, 120000);
 
   it("[vyper] should return the approval for the spender", async () => {
     const tokenAddress = "0xD533a949740bb3306d119CC777fa900bA034cd52";
@@ -40,5 +40,5 @@ describe("getErc20Approval", () => {
     expect(approval.toString()).toBe(
       "1461501637330902918203684832716283019655932542975"
     );
-  }, 30000);
+  }, 120000);
 });

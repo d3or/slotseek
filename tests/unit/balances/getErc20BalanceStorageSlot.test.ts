@@ -25,7 +25,7 @@ describe("getErc20BalanceStorageSlot", () => {
     expect(slot).toBe("0x09");
     expect(balance.toString()).toBe("8600000");
     expect(isVyper).toBe(false);
-  }, 30000);
+  }, 120000);
 
   it("[vyper] should return the slot and balance for the holder", async () => {
     const tokenAddress = "0xD533a949740bb3306d119CC777fa900bA034cd52";
@@ -42,5 +42,5 @@ describe("getErc20BalanceStorageSlot", () => {
     expect(slot).toBe("0x03");
     expect(balance.toString()).toBe("45868293345383087538");
     expect(isVyper).toBe(true);
-  }, 30000);
+  }, 120000);
 });

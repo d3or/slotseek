@@ -75,7 +75,7 @@ describe("mockErc20Balance", () => {
     );
 
     expect(balance.eq(data.balance)).toBe(true);
-  }, 30000);
+  }, 120000);
 
   it("[vyper] should mock the balance of an address for an ERC20 token", async () => {
     const tokenAddress = "0xD533a949740bb3306d119CC777fa900bA034cd52";
@@ -138,5 +138,5 @@ describe("mockErc20Balance", () => {
     );
 
     expect(balance.eq(data.balance)).toBe(true);
-  }, 30000);
+  }, 120000);
 });

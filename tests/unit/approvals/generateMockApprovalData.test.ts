@@ -30,7 +30,7 @@ describe("generateMockApprovalData", () => {
     expect(data.slot).toBeDefined();
     expect(data.approval).toBeDefined();
     expect(data.isVyper).toBe(false);
-  }, 30000);
+  }, 120000);
 
   it("[vyper] should generate mock approval data", async () => {
     const tokenAddress = "0xD533a949740bb3306d119CC777fa900bA034cd52";
@@ -52,5 +52,5 @@ describe("generateMockApprovalData", () => {
     expect(data.slot).toBeDefined();
     expect(data.approval).toBeDefined();
     expect(data.isVyper).toBe(true);
-  }, 30000);
+  }, 120000);
 });

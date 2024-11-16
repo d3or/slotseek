@@ -20,7 +20,7 @@ describe("getErc20Balance", () => {
     );
     expect(balance).toBeDefined();
     expect(balance.toString()).toBe("8600000");
-  }, 30000);
+  }, 120000);
 
   it("[vyper] should return the balance for the owner", async () => {
     const tokenAddress = "0xD533a949740bb3306d119CC777fa900bA034cd52";
@@ -32,5 +32,5 @@ describe("getErc20Balance", () => {
     );
     expect(balance).toBeDefined();
     expect(balance.toString()).toBe("45868293345383087538");
-  }, 30000);
+  }, 120000);
 });

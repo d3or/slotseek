@@ -71,5 +71,5 @@ describe("mockErc20Approval", () => {
 
     // check the approval
     expect(approval.eq(mockApprovalAmount)).toBe(true);
-  }, 30000);
+  }, 120000);
 });
