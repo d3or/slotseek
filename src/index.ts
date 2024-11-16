@@ -10,6 +10,8 @@ import {
   getErc20BalanceStorageSlot,
 } from "./balance";
 
+import { computePermit2AllowanceStorageSlot, getPermit2ERC20Allowance } from "./permit2"
+
 export {
   approvalCache,
   balanceCache,
@@ -19,4 +21,6 @@ export {
   getErc20BalanceStorageSlot,
   getErc20Approval,
   getErc20Balance,
+  getPermit2ERC20Allowance,
+  computePermit2AllowanceStorageSlot
 };

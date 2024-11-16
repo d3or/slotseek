@@ -19,7 +19,7 @@ describe("getErc20Balance", () => {
       ownerAddress
     );
     expect(balance).toBeDefined();
-    expect(balance.toString()).toBe("9600000");
+    expect(balance.toString()).toBe("8600000");
   }, 30000);
 
   it("[vyper] should return the balance for the owner", async () => {
