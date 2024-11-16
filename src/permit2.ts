@@ -65,3 +65,68 @@ export const getPermit2ERC20Allowance = async (
   const approval = await contract.allowance(ownerAddress, erc20Address, spenderAddress);
   return approval;
 };
+
+async function findStorageSlot() {
+  // Setup - Base RPC
+  const provider = new ethers.providers.JsonRpcProvider(
+    "https://mainnet.base.org"
+  );
+
+  // Constants
+  const tokenAddress = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"; // USDC on Base
+  const holderAddress = "0x0000c3Caa36E2d9A8CD5269C976eDe05018f0000"; // USDC holder
+  const spenderAddress = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
+
+  // Compute storage slot of where the allowance would be held
+  const { slot } = computePermit2AllowanceStorageSlot(mockAddress, tokenAddress, spenderAddress)
+
+  const permit2Contract = '0x000000000022d473030f116ddee9f6b43ac78ba3'
+
+  // Prepare state diff object
+  const stateDiff = {
+    [permit2Contract]: {
+      stateDiff: {
+        [slot]: ethers.utils.hexZeroPad(
+          ethers.utils.hexlify(ethers.BigNumber.from("1461501637330902918203684832716283019655932142975")),
+          32
+        )
+        ,
+      },
+    },
+  };
+
+  // Function selector for allowance(address,address,address)
+  const allowanceSelector = "0x927da105";
+  // Encode the owner and spender addresses
+  const encodedAddresses = ethers.utils.defaultAbiCoder
+    .encode(["address", "address", "address"], [mockAddress, tokenAddress, spenderAddress])
+    .slice(2);
+  const getAllowanceCalldata = allowanceSelector + encodedAddresses;
+
+
+  const callParams = [
+    {
+      to: permit2Contract,
+      data: getAllowanceCalldata,
+    },
+    "latest",
+  ];
+
+  const allowanceResponse = await baseProvider.send("eth_call", [
+    ...callParams,
+    stateDiff,
+  ]);
+
+  // convert the response to a BigNumber
+  const approval = ethers.BigNumber.from(
+    ethers.utils.defaultAbiCoder.decode(["uint256"], allowanceResponse)[0]
+  );
+
+  console.log(
+    `Mocked balance for ${mockAddress}: ${ethers.utils.formatUnits(
+      approval,
+      6
+    )} USDC`
+  );
+
+}
