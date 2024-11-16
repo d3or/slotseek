@@ -19,7 +19,6 @@ describe("getPermit2ERC20Allowance", () => {
 			tokenAddress,
 			spenderAddress
 		);
-		console.log(computePermit2AllowanceStorageSlot(ownerAddress, tokenAddress, spenderAddress))
 		expect(allowance).toBeDefined();
 		expect(allowance.toString()).toBe("1");
 

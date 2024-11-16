@@ -14,12 +14,10 @@ import { ethers } from "ethers";
  */
 export const computePermit2AllowanceStorageSlot = (ownerAddress: string, erc20Address: string, spenderAddress: string): {
   slot: string;
-  slotHash: string;
-  slotHash2: string;
 } => {
 
   // Calculate the slot hash, using the owner address and the slot index (1)
-  const slotHash = ethers.utils.keccak256(
+  const ownerSlotHash = ethers.utils.keccak256(
     ethers.utils.defaultAbiCoder.encode(
       ["address", "uint256"],
       [ownerAddress, 1]
@@ -27,20 +25,20 @@ export const computePermit2AllowanceStorageSlot = (ownerAddress: string, erc20Ad
   );
 
   // Calcualte the storage slot hash for spender slot
-  const slotHash2 = ethers.utils.keccak256(
+  const tokenSlotHash = ethers.utils.keccak256(
     ethers.utils.defaultAbiCoder.encode(
       ["address", "bytes32"],
-      [erc20Address, slotHash]
+      [erc20Address, ownerSlotHash]
     )
   );
   // Calculate the final storage slot to mock, using the spender address and the slot hash2
   const slot = ethers.utils.keccak256(
     ethers.utils.defaultAbiCoder.encode(
       ["address", "bytes32"],
-      [spenderAddress, slotHash2]
+      [spenderAddress, tokenSlotHash]
     )
   );
-  return { slot, slotHash, slotHash2 }
+  return { slot }
 }
 
 
