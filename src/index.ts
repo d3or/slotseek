@@ -1,4 +1,11 @@
 import { approvalCache, balanceCache } from './cache';
+import { getStorageLayoutCacheKey } from "./cache";
+import {
+  StorageLayoutCacheAdapter,
+  StorageLayoutCacheOptions,
+  StorageLayoutKind,
+  VerifiedStorageLayout,
+} from "./types";
 import {
   generateMockApprovalData,
   getErc20Approval,
@@ -23,4 +30,12 @@ export {
   getErc20Balance,
   getPermit2ERC20Allowance,
   computePermit2AllowanceStorageSlot
+};
+
+export {
+  getStorageLayoutCacheKey,
+  StorageLayoutCacheAdapter,
+  StorageLayoutCacheOptions,
+  StorageLayoutKind,
+  VerifiedStorageLayout,
 };

@@ -30,6 +30,38 @@ npm install @d3or/slotseek
 yarn add @d3or/slotseek
 ```
 
+## Optional verified-layout cache
+
+Applications can supply any async cache implementation. slotseek does not create a
+network connection or depend on a particular cache client.
+
+```typescript
+import { generateMockBalanceData, StorageLayoutCacheAdapter } from "@d3or/slotseek";
+
+const cache: StorageLayoutCacheAdapter = {
+  get: async (key) => JSON.parse((await redis.get(key)) ?? "null"),
+  set: async (key, layout, ttlSeconds) => {
+    await redis.set(key, JSON.stringify(layout), "EX", ttlSeconds);
+  },
+};
+
+await generateMockBalanceData(provider, {
+  tokenAddress,
+  holderAddress,
+  mockAddress,
+  cache,
+  chainId: 8453, // optional; otherwise resolved from provider.getNetwork()
+  cacheTtlSeconds: 7 * 24 * 60 * 60,
+  cacheTimeoutMs: 200,
+});
+```
+
+Keys are versioned and scoped by layout kind, chain ID, and lowercased token.
+Only layouts verified against a positive on-chain balance or allowance are cached.
+Malformed, expired, failed, or slow cache reads are treated as misses, and cache
+write failures never fail slot discovery. Zero-allowance fallback guesses are not
+cached or shared as verified discoveries.
+
 ## TODO
 
 - [X] Add caching options to reduce the number of RPC calls and reduce the time it takes to find the same slot again
