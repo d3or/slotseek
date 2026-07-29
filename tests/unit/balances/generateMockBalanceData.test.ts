@@ -31,7 +31,7 @@ describe("generateMockBalanceData", () => {
 
   it("[vyper] should generate mock balance data", async () => {
     const tokenAddress = "0xD533a949740bb3306d119CC777fa900bA034cd52";
-    const holderAddress = "0x0000c3Caa36E2d9A8CD5269C976eDe05018f0000";
+    const holderAddress = "0x5f3b5DfEb7B28CDbD7FAba78963EE202a494e2A2";
     const mockAddress = ethers.Wallet.createRandom().address;
     const mockBalanceAmount = "1000000";
     const maxSlots = 30;
