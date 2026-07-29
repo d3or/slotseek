@@ -12,6 +12,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
+    "prepack": "npm run build",
     "prepublishOnly": "npm run build && npm test"
   },
   "jest": {
