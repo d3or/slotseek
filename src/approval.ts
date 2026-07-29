@@ -1,5 +1,15 @@
 import { ethers } from "ethers";
-import { approvalCache } from "./cache";
+import {
+  approvalCache,
+  getExternalLayout,
+  getLocalLayout,
+  getStorageAtLimited,
+  resolveCacheContext,
+  runVerifiedDiscovery,
+  setExternalLayout,
+  setLocalLayout,
+} from "./cache";
+import { StorageLayoutCacheOptions, VerifiedStorageLayout } from "./types";
 
 /**
  * Generate mock approval data for a given ERC20 token
@@ -22,7 +32,8 @@ export const generateMockApprovalData = async (
     mockAddress,
     mockApprovalAmount,
     maxSlots = 30,
-    useFallbackSlot = false
+    useFallbackSlot = false,
+    ...cacheOptions
   }: {
     tokenAddress: string;
     ownerAddress: string;
@@ -31,7 +42,7 @@ export const generateMockApprovalData = async (
     mockApprovalAmount: string;
     maxSlots?: number;
     useFallbackSlot?: boolean;
-  }
+  } & StorageLayoutCacheOptions
 ): Promise<{
   slot: string;
   approval: string;
@@ -44,8 +55,8 @@ export const generateMockApprovalData = async (
     ownerAddress,
     spenderAddress,
     maxSlots,
-    useFallbackSlot
-
+    useFallbackSlot,
+    cacheOptions
   );
 
   // make sure its padded to 32 bytes, and convert to a BigNumber
@@ -109,130 +120,124 @@ export const getErc20ApprovalStorageSlot = async (
   ownerAddress: string,
   spenderAddress: string,
   maxSlots: number,
-  useFallbackSlot = false
+  useFallbackSlot = false,
+  options: StorageLayoutCacheOptions = {}
 ): Promise<{
   slot: string;
   slotHash: string;
   isVyper: boolean;
 }> => {
-  // check the cache
-  const cachedValue = approvalCache.get(erc20Address.toLowerCase());
-  if (cachedValue) {
-    if (cachedValue.isVyper) {
-      const { vyperSlotHash } = calculateApprovalVyperStorageSlot(ownerAddress, spenderAddress, cachedValue.slot)
-      return {
-        slot: ethers.BigNumber.from(cachedValue.slot).toHexString(),
-        slotHash: vyperSlotHash,
-        isVyper: true,
-      };
-
-    } else {
-      const { slotHash } = calculateApprovalSolidityStorageSlot(ownerAddress, spenderAddress, cachedValue.slot)
-      return {
-        slot: ethers.BigNumber.from(cachedValue.slot).toHexString(),
-        slotHash: slotHash,
-        isVyper: false,
-      }
-    }
+  const context = await resolveCacheContext(provider, "approval", erc20Address, options);
+  let layout = getLocalLayout(approvalCache, context.key, context.ttlSeconds);
+  if (!layout) {
+    layout = await getExternalLayout(options, context.key, context.ttlSeconds, context.timeoutMs);
+    if (layout) setLocalLayout(approvalCache, context.key, layout, context.ttlSeconds);
   }
 
-  // Get the approval for the spender, that we can use to find the slot
-  let approval = await getErc20Approval(
-    provider,
-    erc20Address,
-    ownerAddress,
-    spenderAddress
-  );
-
-  if (approval.gt(0)) {
-    for (let i = 0; i < maxSlots; i++) {
-      const { storageSlot, slotHash } = calculateApprovalSolidityStorageSlot(ownerAddress, spenderAddress, i)
-      // Get the value at the storage slot
-      const storageValue = await provider.getStorageAt(erc20Address, storageSlot);
-      // If the value at the storage slot is equal to the approval, return the slot as we have found the correct slot for approvals
-      if (ethers.BigNumber.from(storageValue).eq(approval)) {
-        approvalCache.set(erc20Address.toLowerCase(), {
-          slot: i,
-          isVyper: false,
-          ts: Date.now()
-        });
-        return {
-          slot: ethers.BigNumber.from(i).toHexString(),
-          slotHash: slotHash,
-          isVyper: false,
-        };
-      }
-
-      const { vyperStorageSlot, vyperSlotHash } = calculateApprovalVyperStorageSlot(ownerAddress, spenderAddress, i)
-      const vyperStorageValue = await provider.getStorageAt(
-        erc20Address,
-        vyperStorageSlot
+  let approval: ethers.BigNumber | undefined;
+  if (!layout) {
+    layout = await runVerifiedDiscovery(context.key, async () => {
+      approval = await getErc20Approval(
+        provider, erc20Address, ownerAddress, spenderAddress
       );
+      if (approval.eq(0)) return undefined;
+      const discovered = await discoverApprovalLayout(
+        provider, erc20Address, ownerAddress, spenderAddress, approval, maxSlots
+      );
+      if (!discovered) return undefined;
+      setLocalLayout(approvalCache, context.key, discovered, context.ttlSeconds);
+      await setExternalLayout(
+        options, context.key, discovered, context.ttlSeconds, context.timeoutMs
+      );
+      return discovered;
+    });
+  }
 
-      if (ethers.BigNumber.from(vyperStorageValue).eq(approval)) {
-        approvalCache.set(erc20Address.toLowerCase(), {
-          slot: i,
-          isVyper: false,
-          ts: Date.now()
-        });
+  if (!layout && useFallbackSlot) {
+    approval ??= await getErc20Approval(provider, erc20Address, ownerAddress, spenderAddress);
+    layout = await findApprovalFallback(
+      provider, erc20Address, ownerAddress, spenderAddress, approval
+    );
+    // Zero equality is only a caller-specific fallback guess, never a verified layout.
+    if (layout && approval.gt(0)) {
+      setLocalLayout(approvalCache, context.key, layout, context.ttlSeconds);
+      await setExternalLayout(
+        options, context.key, layout, context.ttlSeconds, context.timeoutMs
+      );
+    }
+  }
 
-        return {
-          slot: ethers.BigNumber.from(i).toHexString(),
-          slotHash: vyperSlotHash,
-          isVyper: true,
-        };
+  if (!layout) {
+    if (!useFallbackSlot && approval?.gt(0)) throw new Error("Approval does not exist");
+    throw new Error("Unable to find approval slot");
+  }
+  const slotHash = layout.isVyper
+    ? calculateApprovalVyperStorageSlot(ownerAddress, spenderAddress, layout.slot).vyperSlotHash
+    : calculateApprovalSolidityStorageSlot(ownerAddress, spenderAddress, layout.slot).slotHash;
+  return {
+    slot: ethers.BigNumber.from(layout.slot).toHexString(),
+    slotHash,
+    isVyper: layout.isVyper,
+  };
+};
+
+const discoverApprovalLayout = async (
+  provider: ethers.providers.JsonRpcProvider,
+  erc20Address: string,
+  ownerAddress: string,
+  spenderAddress: string,
+  approval: ethers.BigNumber,
+  maxSlots: number
+): Promise<VerifiedStorageLayout | undefined> => {
+  const batchSize = 2;
+  for (let start = 0; start < maxSlots; start += batchSize) {
+    const candidates: Array<{ slot: number; isVyper: boolean; position: string }> = [];
+    for (let slot = start; slot < Math.min(start + batchSize, maxSlots); slot++) {
+      candidates.push({ slot, isVyper: false, position:
+        calculateApprovalSolidityStorageSlot(ownerAddress, spenderAddress, slot).storageSlot });
+      candidates.push({ slot, isVyper: true, position:
+        calculateApprovalVyperStorageSlot(ownerAddress, spenderAddress, slot).vyperStorageSlot });
+    }
+    const values = await Promise.allSettled(candidates.map((candidate) =>
+      getStorageAtLimited(provider, erc20Address, candidate.position)
+    ));
+    for (let i = 0; i < candidates.length; i++) {
+      const value = values[i];
+      if (value.status === "fulfilled" && ethers.BigNumber.from(value.value).eq(approval)) {
+        return { slot: candidates[i].slot, isVyper: candidates[i].isVyper, verifiedAt: Date.now() };
       }
     }
-    if (!useFallbackSlot)
-      throw new Error("Approval does not exist");
   }
+  return undefined;
+};
 
-  if (useFallbackSlot) {
-    // if useFallBackSlot = true, then we are just going to assume the slot is at the slot which is most common for erc20 tokens. for approvals, this is slot #10
-
-    const fallbackSlot = 10;
-    // check solidity, then check vyper.
-    // (dont have an easy way to check if a contract is solidity/vyper)
-    const { storageSlot, slotHash } = calculateApprovalSolidityStorageSlot(ownerAddress, spenderAddress, fallbackSlot)
-    // Get the value at the storage slot
-    const storageValue = await provider.getStorageAt(erc20Address, storageSlot);
-    // If the value at the storage slot is equal to the approval, return the slot as we have found the correct slot for approvals
-    if (ethers.BigNumber.from(storageValue).eq(approval)) {
-      approvalCache.set(erc20Address.toLowerCase(), {
-        slot: fallbackSlot,
-        isVyper: false,
-        ts: Date.now()
-      });
-
-      return {
-        slot: ethers.BigNumber.from(fallbackSlot).toHexString(),
-        slotHash: slotHash,
-        isVyper: false,
-      };
+const findApprovalFallback = async (
+  provider: ethers.providers.JsonRpcProvider,
+  erc20Address: string,
+  ownerAddress: string,
+  spenderAddress: string,
+  approval: ethers.BigNumber
+): Promise<VerifiedStorageLayout | undefined> => {
+  const slot = 10;
+  const solidityPosition = calculateApprovalSolidityStorageSlot(
+    ownerAddress, spenderAddress, slot
+  ).storageSlot;
+  try {
+    const value = await getStorageAtLimited(provider, erc20Address, solidityPosition);
+    if (ethers.BigNumber.from(value).eq(approval)) {
+      return { slot, isVyper: false, verifiedAt: Date.now() };
     }
-
-    // check vyper
-    const { vyperStorageSlot, vyperSlotHash } = calculateApprovalVyperStorageSlot(ownerAddress, spenderAddress, fallbackSlot)
-    const vyperStorageValue = await provider.getStorageAt(
-      erc20Address,
-      vyperStorageSlot
-    );
-    if (ethers.BigNumber.from(vyperStorageValue).eq(approval)) {
-      approvalCache.set(erc20Address.toLowerCase(), {
-        slot: fallbackSlot,
-        isVyper: true,
-        ts: Date.now()
-      });
-
-      return {
-        slot: ethers.BigNumber.from(fallbackSlot).toHexString(),
-        slotHash: vyperSlotHash,
-        isVyper: true,
-      };
+  } catch {}
+  const vyperPosition = calculateApprovalVyperStorageSlot(
+    ownerAddress, spenderAddress, slot
+  ).vyperStorageSlot;
+  try {
+    const value = await getStorageAtLimited(provider, erc20Address, vyperPosition);
+    if (ethers.BigNumber.from(value).eq(approval)) {
+      return { slot, isVyper: true, verifiedAt: Date.now() };
     }
-  }
-
-  throw new Error("Unable to find approval slot");
+  } catch {}
+  return undefined;
 };
 
 // Generates approval solidity storage slot data

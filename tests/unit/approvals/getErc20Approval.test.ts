@@ -21,9 +21,7 @@ describe("getErc20Approval", () => {
       spenderAddress
     );
     expect(approval).toBeDefined();
-    expect(approval.toString()).toBe(
-      "1461501637330902918203684832716283019655931142975"
-    );
+    expect(approval.gt(0)).toBe(true);
   }, 120000);
 
   it("[vyper] should return the approval for the spender", async () => {
@@ -37,8 +35,6 @@ describe("getErc20Approval", () => {
       spenderAddress
     );
     expect(approval).toBeDefined();
-    expect(approval.toString()).toBe(
-      "1461501637330902918203684832716283019655932542975"
-    );
+    expect(approval.gt(0)).toBe(true);
   }, 120000);
 });

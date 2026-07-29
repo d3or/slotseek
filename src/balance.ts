@@ -1,5 +1,15 @@
 import { ethers } from "ethers";
-import { balanceCache } from "./cache";
+import {
+  balanceCache,
+  getExternalLayout,
+  getLocalLayout,
+  getStorageAtLimited,
+  resolveCacheContext,
+  runVerifiedDiscovery,
+  setExternalLayout,
+  setLocalLayout,
+} from "./cache";
+import { StorageLayoutCacheOptions, VerifiedStorageLayout } from "./types";
 
 /**
  * Generate mock data for a given ERC20 token balance
@@ -20,13 +30,14 @@ export const generateMockBalanceData = async (
     mockAddress,
     mockBalanceAmount,
     maxSlots = 30,
+    ...cacheOptions
   }: {
     tokenAddress: string;
     holderAddress: string;
     mockAddress: string;
     mockBalanceAmount?: string;
     maxSlots?: number;
-  }
+  } & StorageLayoutCacheOptions
 ): Promise<{
   slot: string;
   balance: string;
@@ -37,7 +48,8 @@ export const generateMockBalanceData = async (
     provider,
     tokenAddress,
     holderAddress,
-    maxSlots
+    maxSlots,
+    cacheOptions
   );
 
   // make sure its padded to 32 bytes, and convert to a BigNumber
@@ -88,89 +100,95 @@ export const getErc20BalanceStorageSlot = async (
   provider: ethers.providers.JsonRpcProvider,
   erc20Address: string,
   holderAddress: string,
-  maxSlots = 30
+  maxSlots = 30,
+  options: StorageLayoutCacheOptions = {}
 ): Promise<{
   slot: string;
   balance: ethers.BigNumber;
   isVyper: boolean;
 }> => {
-  // check the cache
-  const cachedValue = balanceCache.get(erc20Address.toLowerCase());
-  if (cachedValue) {
-    if (cachedValue.isVyper) {
-      const { vyperSlotHash } = calculateBalanceVyperStorageSlot(holderAddress, cachedValue.slot)
-      const vyperBalance = await provider.getStorageAt(
-        erc20Address,
-        vyperSlotHash
+  const context = await resolveCacheContext(provider, "balance", erc20Address, options);
+  let layout = getLocalLayout(balanceCache, context.key, context.ttlSeconds);
+  if (!layout) {
+    layout = await getExternalLayout(options, context.key, context.ttlSeconds, context.timeoutMs);
+    if (layout) setLocalLayout(balanceCache, context.key, layout, context.ttlSeconds);
+  }
+
+  let discoveredBalance: ethers.BigNumber | undefined;
+  if (!layout) {
+    layout = await runVerifiedDiscovery(context.key, async () => {
+      const userBalance = await getErc20Balance(provider, erc20Address, holderAddress);
+      if (userBalance.eq(0)) throw new Error("User has no balance");
+      const discovered = await discoverBalanceLayout(
+        provider, erc20Address, holderAddress, userBalance, maxSlots
       );
-      return {
-        slot: ethers.BigNumber.from(cachedValue.slot).toHexString(),
-        balance: ethers.BigNumber.from(vyperBalance),
-        isVyper: true,
-      };
-    } else {
-      const { slotHash } = calculateBalanceSolidityStorageSlot(holderAddress, cachedValue.slot);
-      const balance = await provider.getStorageAt(erc20Address, slotHash);
-      return {
-        slot: ethers.BigNumber.from(cachedValue.slot).toHexString(),
-        balance: ethers.BigNumber.from(balance),
+      if (!discovered) throw new Error("Unable to find balance slot");
+      discoveredBalance = discovered.balance;
+      setLocalLayout(balanceCache, context.key, discovered.layout, context.ttlSeconds);
+      await setExternalLayout(
+        options, context.key, discovered.layout, context.ttlSeconds, context.timeoutMs
+      );
+      return discovered.layout;
+    });
+  }
+
+  if (!layout) throw new Error("Unable to find balance slot");
+  const storagePosition = layout.isVyper
+    ? calculateBalanceVyperStorageSlot(holderAddress, layout.slot).vyperSlotHash
+    : calculateBalanceSolidityStorageSlot(holderAddress, layout.slot).slotHash;
+  const balance = discoveredBalance ?? await getStorageAtLimited(
+    provider, erc20Address, storagePosition
+  );
+  return {
+    slot: ethers.BigNumber.from(layout.slot).toHexString(),
+    balance: ethers.BigNumber.from(balance),
+    isVyper: layout.isVyper,
+  };
+};
+
+const discoverBalanceLayout = async (
+  provider: ethers.providers.JsonRpcProvider,
+  erc20Address: string,
+  holderAddress: string,
+  userBalance: ethers.BigNumber,
+  maxSlots: number
+): Promise<{
+  layout: VerifiedStorageLayout;
+  balance: ethers.BigNumber;
+} | undefined> => {
+  const batchSize = 2;
+  for (let start = 0; start < maxSlots; start += batchSize) {
+    const candidates: Array<{ slot: number; isVyper: boolean; position: string }> = [];
+    for (let slot = start; slot < Math.min(start + batchSize, maxSlots); slot++) {
+      candidates.push({
+        slot,
         isVyper: false,
+        position: calculateBalanceSolidityStorageSlot(holderAddress, slot).slotHash,
+      });
+      candidates.push({
+        slot,
+        isVyper: true,
+        position: calculateBalanceVyperStorageSlot(holderAddress, slot).vyperSlotHash,
+      });
+    }
+    const values = await Promise.allSettled(candidates.map((candidate) =>
+      getStorageAtLimited(provider, erc20Address, candidate.position)
+    ));
+    for (let i = 0; i < candidates.length; i++) {
+      const value = values[i];
+      if (value.status === "fulfilled" && ethers.BigNumber.from(value.value).eq(userBalance)) {
+        return {
+          layout: {
+            slot: candidates[i].slot,
+            isVyper: candidates[i].isVyper,
+            verifiedAt: Date.now(),
+          },
+          balance: ethers.BigNumber.from(value.value),
+        };
       }
     }
   }
-
-  // Get the balance of the holder, that we can use to find the slot
-  const userBalance = await getErc20Balance(
-    provider,
-    erc20Address,
-    holderAddress
-  );
-  // If the balance is 0, we can't find the slot, so throw an error
-  if (userBalance.eq(0)) {
-    throw new Error("User has no balance");
-  }
-  // We iterate over maxSlots, maxSlots is set to 100 by default, its unlikely that an erc20 token will be using up more than 100 slots tbh
-  // For each slot, we compute the storage slot key [holderAddress, slot index] and get the value at that storage slot
-  // If the value at the storage slot is equal to the balance, return the slot as we have found the correct slot for balances
-  for (let i = 0; i < maxSlots; i++) {
-    const { slotHash } = calculateBalanceSolidityStorageSlot(holderAddress, i);
-    const balance = await provider.getStorageAt(erc20Address, slotHash);
-
-    if (ethers.BigNumber.from(balance).eq(userBalance)) {
-      balanceCache.set(erc20Address.toLowerCase(), {
-        slot: i,
-        isVyper: false,
-        ts: Date.now()
-      })
-
-      return {
-        slot: ethers.BigNumber.from(i).toHexString(),
-        balance: ethers.BigNumber.from(balance),
-        isVyper: false,
-      };
-    }
-
-    const { vyperSlotHash } = calculateBalanceVyperStorageSlot(holderAddress, i)
-    const vyperBalance = await provider.getStorageAt(
-      erc20Address,
-      vyperSlotHash
-    );
-
-    if (ethers.BigNumber.from(vyperBalance).eq(userBalance)) {
-      balanceCache.set(erc20Address.toLowerCase(), {
-        slot: i,
-        isVyper: true,
-        ts: Date.now()
-      })
-
-      return {
-        slot: ethers.BigNumber.from(i).toHexString(),
-        balance: ethers.BigNumber.from(vyperBalance),
-        isVyper: true,
-      };
-    }
-  }
-  throw new Error("Unable to find balance slot");
+  return undefined;
 };
 
 

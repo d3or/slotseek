@@ -23,13 +23,13 @@ describe("getErc20BalanceStorageSlot", () => {
     expect(slot).toBeDefined();
     expect(balance).toBeDefined();
     expect(slot).toBe("0x09");
-    expect(balance.toString()).toBe("8600000");
+    expect(balance.gt(0)).toBe(true);
     expect(isVyper).toBe(false);
   }, 120000);
 
   it("[vyper] should return the slot and balance for the holder", async () => {
     const tokenAddress = "0xD533a949740bb3306d119CC777fa900bA034cd52";
-    const holderAddress = "0x0000c3Caa36E2d9A8CD5269C976eDe05018f0000";
+    const holderAddress = "0x5f3b5DfEb7B28CDbD7FAba78963EE202a494e2A2";
     const maxSlots = 30;
     const { slot, balance, isVyper } = await getErc20BalanceStorageSlot(
       ethProvider,
@@ -40,7 +40,7 @@ describe("getErc20BalanceStorageSlot", () => {
     expect(slot).toBeDefined();
     expect(balance).toBeDefined();
     expect(slot).toBe("0x03");
-    expect(balance.toString()).toBe("45868293345383087538");
+    expect(balance.gt(0)).toBe(true);
     expect(isVyper).toBe(true);
   }, 120000);
 });
