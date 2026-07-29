@@ -98,7 +98,10 @@ export const getLocalLayout = (
   ttlSeconds: number
 ): VerifiedStorageLayout | undefined => {
   const value = cache.get(key);
-  const expiresAt = value?.expiresAt ?? (value ? value.ts + ttlSeconds * 1000 : 0);
+  const callerExpiresAt = value ? value.ts + ttlSeconds * 1000 : 0;
+  const expiresAt = value?.expiresAt
+    ? Math.min(value.expiresAt, callerExpiresAt)
+    : callerExpiresAt;
   if (!value || Date.now() >= expiresAt) {
     if (value) cache.delete(key);
     return undefined;

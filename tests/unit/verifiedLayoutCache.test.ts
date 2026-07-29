@@ -123,6 +123,27 @@ describe("verified storage layout caching", () => {
     expect(cache.get).toHaveBeenCalledWith(`slotseek:v1:balance:8453:${token}`);
   });
 
+  it("honors a shorter TTL from a later caller", async () => {
+    const rpc = provider();
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(9));
+    jest.spyOn(rpc, "getStorageAt").mockImplementation(async (_address, position) =>
+      position === balancePosition(owner, 0) ? encoded(9) : zero
+    );
+    const now = jest.spyOn(Date, "now").mockReturnValue(1_000_000);
+
+    await getErc20BalanceStorageSlot(rpc, token, owner, 2, {
+      chainId: 1,
+      cacheTtlSeconds: 7 * 24 * 60 * 60,
+    });
+    now.mockReturnValue(1_000_000 + 2 * 60 * 60 * 1000);
+    await getErc20BalanceStorageSlot(rpc, token, owner, 2, {
+      chainId: 1,
+      cacheTtlSeconds: 60 * 60,
+    });
+
+    expect(call).toHaveBeenCalledTimes(2);
+  });
+
   it("does not cache or share a zero-allowance fallback as verified", async () => {
     const rpc = provider();
     const cache: StorageLayoutCacheAdapter = {
