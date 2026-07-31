@@ -1,6 +1,7 @@
 import { ethers } from "ethers";
 import {
   CacheMapType,
+  MissingStorageLayout,
   StorageLayoutCacheOptions,
   StorageLayoutKind,
   VerifiedStorageLayout,
@@ -9,17 +10,24 @@ import {
 // check every minute
 const CACHE_INTERVAL = 60 * 1000;
 export const DEFAULT_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
+export const DEFAULT_NEGATIVE_CACHE_TTL_SECONDS = 5 * 60;
 export const DEFAULT_CACHE_TIMEOUT_MS = 200;
 const CACHE_KEY_VERSION = "v1";
 
 export const approvalCache: CacheMapType = new Map();
 export const balanceCache: CacheMapType = new Map();
+export const missingLayoutCache = new Map<string, MissingStorageLayout & {
+  ts: number;
+  expiresAt: number;
+}>();
 
 export const getStorageLayoutCacheKey = (
   kind: StorageLayoutKind,
   chainId: number,
   tokenAddress: string
 ) => `slotseek:${CACHE_KEY_VERSION}:${kind}:${chainId}:${tokenAddress.toLowerCase()}`;
+
+const getMissingStorageLayoutCacheKey = (key: string) => `${key}:missing`;
 
 export const resolveCacheContext = async (
   provider: ethers.providers.JsonRpcProvider,
@@ -32,6 +40,8 @@ export const resolveCacheContext = async (
   return {
     chainId,
     ttlSeconds,
+    negativeTtlSeconds:
+      options.negativeCacheTtlSeconds ?? DEFAULT_NEGATIVE_CACHE_TTL_SECONDS,
     timeoutMs: options.cacheTimeoutMs ?? DEFAULT_CACHE_TIMEOUT_MS,
     key: getStorageLayoutCacheKey(kind, chainId, tokenAddress),
   };
@@ -62,18 +72,48 @@ export const isVerifiedStorageLayout = (
     Date.now() - layout.verifiedAt < ttlSeconds * 1000;
 };
 
+export const isMissingStorageLayout = (
+  value: unknown,
+  ttlSeconds: number,
+  maxSlots: number
+): value is MissingStorageLayout => {
+  if (!value || typeof value !== "object") return false;
+  const layout = value as MissingStorageLayout;
+  return typeof layout.missingAt === "number" &&
+    Number.isFinite(layout.missingAt) &&
+    layout.missingAt <= Date.now() &&
+    Number.isInteger(layout.maxSlots) &&
+    layout.maxSlots >= maxSlots &&
+    Date.now() - layout.missingAt < ttlSeconds * 1000;
+};
+
 export const getExternalLayout = async (
   options: StorageLayoutCacheOptions,
   key: string,
   ttlSeconds: number,
+  negativeTtlSeconds: number,
+  maxSlots: number,
   timeoutMs: number
-): Promise<VerifiedStorageLayout | undefined> => {
-  if (!options.cache) return undefined;
+): Promise<{
+  layout?: VerifiedStorageLayout;
+  missing: boolean;
+}> => {
+  if (!options.cache) return { missing: false };
   try {
     const value = await withDeadline(options.cache.get(key), timeoutMs);
-    return isVerifiedStorageLayout(value, ttlSeconds) ? value : undefined;
+    if (isVerifiedStorageLayout(value, ttlSeconds)) {
+      return { layout: value, missing: false };
+    }
+    const missingValue = await withDeadline(
+      options.cache.get(getMissingStorageLayoutCacheKey(key)), timeoutMs
+    );
+    return {
+      missing: isMissingStorageLayout(
+        missingValue, negativeTtlSeconds, maxSlots
+      ),
+    };
   } catch {
-    return undefined;
+    return { missing: false };
   }
 };
 
@@ -87,6 +127,28 @@ export const setExternalLayout = async (
   if (!options.cache) return;
   try {
     await withDeadline(options.cache.set(key, value, ttlSeconds), timeoutMs);
+  } catch {
+    // Application cache failures must never affect slot discovery.
+  }
+};
+
+export const setExternalMissingLayout = async (
+  options: StorageLayoutCacheOptions,
+  key: string,
+  maxSlots: number,
+  ttlSeconds: number,
+  timeoutMs: number
+) => {
+  if (!options.cache) return;
+  try {
+    await withDeadline(options.cache.set(
+      getMissingStorageLayoutCacheKey(key),
+      {
+        missingAt: Date.now(),
+        maxSlots,
+      },
+      ttlSeconds
+    ), timeoutMs);
   } catch {
     // Application cache failures must never affect slot discovery.
   }
@@ -114,12 +176,46 @@ export const setLocalLayout = (
   key: string,
   value: VerifiedStorageLayout,
   ttlSeconds: number
-) => cache.set(key, {
-  slot: value.slot,
-  isVyper: value.isVyper,
-  ts: value.verifiedAt,
-  expiresAt: value.verifiedAt + ttlSeconds * 1000,
-});
+) => {
+  missingLayoutCache.delete(key);
+  cache.set(key, {
+    slot: value.slot,
+    isVyper: value.isVyper,
+    ts: value.verifiedAt,
+    expiresAt: value.verifiedAt + ttlSeconds * 1000,
+  });
+};
+
+export const getLocalMissingLayout = (
+  key: string,
+  ttlSeconds: number,
+  maxSlots: number
+) => {
+  const value = missingLayoutCache.get(key);
+  const callerExpiresAt = value ? value.ts + ttlSeconds * 1000 : 0;
+  const expiresAt = value ? Math.min(value.expiresAt, callerExpiresAt) : 0;
+  if (!value || Date.now() >= expiresAt || value.maxSlots < maxSlots) {
+    if (value && Date.now() >= expiresAt) missingLayoutCache.delete(key);
+    return false;
+  }
+  return true;
+};
+
+export const setLocalMissingLayout = (
+  cache: CacheMapType,
+  key: string,
+  maxSlots: number,
+  ttlSeconds: number
+) => {
+  if (cache.has(key)) return;
+  const missingAt = Date.now();
+  missingLayoutCache.set(key, {
+    missingAt,
+    maxSlots,
+    ts: missingAt,
+    expiresAt: missingAt + ttlSeconds * 1000,
+  });
+};
 
 const discoveryPromises = new Map<string, Promise<VerifiedStorageLayout | undefined>>();
 
@@ -128,15 +224,7 @@ export const runVerifiedDiscovery = async (
   discover: () => Promise<VerifiedStorageLayout | undefined>
 ) => {
   const existing = discoveryPromises.get(key);
-  if (existing) {
-    try {
-      const shared = await existing;
-      if (shared) return shared;
-    } catch {
-      // Only successful, verified discoveries are safe to share.
-    }
-    return discover();
-  }
+  if (existing) return existing;
   const pending = discover().finally(() => discoveryPromises.delete(key));
   discoveryPromises.set(key, pending);
   return pending;
@@ -176,16 +264,17 @@ export const getStorageAtLimited = async (
 };
 
 
-const clearCacheJob = (type: 'balance' | 'approval') => {
+const clearCacheJob = (
+  cache: Map<string, { ts: number; expiresAt?: number }>,
+  defaultTtlSeconds: number
+) => {
   // 1mb per map
   const totalMaxSize = 1_000_000
-
-  const cache = type === 'balance' ? balanceCache : approvalCache;
   let cacheSize = getMapSizeInBytes(cache);
 
   const now = Date.now();
   for (const [key, value] of cache) {
-    const expiresAt = value.expiresAt ?? value.ts + DEFAULT_CACHE_TTL_SECONDS * 1000;
+    const expiresAt = value.expiresAt ?? value.ts + defaultTtlSeconds * 1000;
     if (now >= expiresAt) cache.delete(key);
   }
   cacheSize = getMapSizeInBytes(cache);
@@ -207,7 +296,7 @@ const clearCacheJob = (type: 'balance' | 'approval') => {
   }
 }
 
-const getMapSizeInBytes = (map: CacheMapType) => {
+const getMapSizeInBytes = (map: Map<string, unknown>) => {
   let totalSize = 0;
 
   for (const [key, value] of map) {
@@ -248,7 +337,8 @@ const getObjectSize = (obj: any) => {
 }
 
 const clearCacheInterval = setInterval(() => {
-  clearCacheJob("balance");
-  clearCacheJob("approval");
+  clearCacheJob(balanceCache, DEFAULT_CACHE_TTL_SECONDS);
+  clearCacheJob(approvalCache, DEFAULT_CACHE_TTL_SECONDS);
+  clearCacheJob(missingLayoutCache, DEFAULT_NEGATIVE_CACHE_TTL_SECONDS);
 }, CACHE_INTERVAL);
 clearCacheInterval.unref?.();

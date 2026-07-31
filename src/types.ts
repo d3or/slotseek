@@ -18,11 +18,18 @@ export interface VerifiedStorageLayout {
   verifiedAt: number;
 }
 
+export interface MissingStorageLayout {
+  missingAt: number;
+  maxSlots: number;
+}
+
+export type StorageLayoutCacheValue = VerifiedStorageLayout | MissingStorageLayout;
+
 export interface StorageLayoutCacheAdapter {
-  get(key: string): Promise<VerifiedStorageLayout | null | undefined>;
+  get(key: string): Promise<StorageLayoutCacheValue | null | undefined>;
   set(
     key: string,
-    value: VerifiedStorageLayout,
+    value: StorageLayoutCacheValue,
     ttlSeconds: number
   ): Promise<void>;
 }
@@ -31,5 +38,6 @@ export interface StorageLayoutCacheOptions {
   cache?: StorageLayoutCacheAdapter;
   chainId?: number;
   cacheTtlSeconds?: number;
+  negativeCacheTtlSeconds?: number;
   cacheTimeoutMs?: number;
 }

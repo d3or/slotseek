@@ -40,8 +40,8 @@ import { generateMockBalanceData, StorageLayoutCacheAdapter } from "@d3or/slotse
 
 const cache: StorageLayoutCacheAdapter = {
   get: async (key) => JSON.parse((await redis.get(key)) ?? "null"),
-  set: async (key, layout, ttlSeconds) => {
-    await redis.set(key, JSON.stringify(layout), "EX", ttlSeconds);
+  set: async (key, value, ttlSeconds) => {
+    await redis.set(key, JSON.stringify(value), "EX", ttlSeconds);
   },
 };
 
@@ -52,15 +52,20 @@ await generateMockBalanceData(provider, {
   cache,
   chainId: 8453, // optional; otherwise resolved from provider.getNetwork()
   cacheTtlSeconds: 7 * 24 * 60 * 60,
+  negativeCacheTtlSeconds: 5 * 60,
   cacheTimeoutMs: 200,
 });
 ```
 
 Keys are versioned and scoped by layout kind, chain ID, and lowercased token.
-Only layouts verified against a positive on-chain balance or allowance are cached.
-Malformed, expired, failed, or slow cache reads are treated as misses, and cache
-write failures never fail slot discovery. Zero-allowance fallback guesses are not
-cached or shared as verified discoveries.
+Positive layout entries are cached only after verification against a positive
+on-chain balance or allowance.
+Complete searches that find no matching layout are cached for five minutes by
+default, while incomplete searches with failed RPC reads are not cached. Negative
+entries also record the search depth, so a caller using a larger `maxSlots` value
+will retry discovery. Malformed, expired, failed, or slow cache reads are treated
+as misses, and cache write failures never fail slot discovery. Zero-allowance
+fallback guesses avoid storage reads and are not cached as verified discoveries.
 
 ## TODO
 

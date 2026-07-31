@@ -3,7 +3,9 @@ import { getStorageLayoutCacheKey } from "./cache";
 import {
   StorageLayoutCacheAdapter,
   StorageLayoutCacheOptions,
+  StorageLayoutCacheValue,
   StorageLayoutKind,
+  MissingStorageLayout,
   VerifiedStorageLayout,
 } from "./types";
 import {
@@ -36,6 +38,8 @@ export {
   getStorageLayoutCacheKey,
   StorageLayoutCacheAdapter,
   StorageLayoutCacheOptions,
+  StorageLayoutCacheValue,
   StorageLayoutKind,
+  MissingStorageLayout,
   VerifiedStorageLayout,
 };

@@ -6,7 +6,9 @@ import {
   getErc20BalanceStorageSlot,
   getStorageLayoutCacheKey,
   StorageLayoutCacheAdapter,
+  StorageLayoutCacheValue,
 } from "../../src";
+import { missingLayoutCache } from "../../src/cache";
 
 const token = "0x1111111111111111111111111111111111111111";
 const owner = "0x2222222222222222222222222222222222222222";
@@ -51,6 +53,7 @@ describe("verified storage layout caching", () => {
   beforeEach(() => {
     balanceCache.clear();
     approvalCache.clear();
+    missingLayoutCache.clear();
     jest.restoreAllMocks();
   });
 
@@ -144,7 +147,7 @@ describe("verified storage layout caching", () => {
     expect(call).toHaveBeenCalledTimes(2);
   });
 
-  it("does not cache or share a zero-allowance fallback as verified", async () => {
+  it("uses the zero-allowance fallback without reading storage or caching it", async () => {
     const rpc = provider();
     const cache: StorageLayoutCacheAdapter = {
       get: jest.fn().mockResolvedValue(undefined),
@@ -160,9 +163,125 @@ describe("verified storage layout caching", () => {
 
     expect(results.map((result) => result.slot)).toEqual(["0x0a", "0x0a"]);
     expect(call).toHaveBeenCalledTimes(2);
-    expect(storage).toHaveBeenCalledTimes(2);
+    expect(storage).not.toHaveBeenCalled();
     expect(cache.set).not.toHaveBeenCalled();
     expect(approvalCache.size).toBe(0);
+  });
+
+  it("shares and negative-caches failed balance discovery", async () => {
+    const rpc = provider();
+    let cached: StorageLayoutCacheValue | undefined;
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockImplementation(async () => cached),
+      set: jest.fn().mockImplementation(async (_key, value) => {
+        cached = value;
+      }),
+    };
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(9));
+    const storage = jest.spyOn(rpc, "getStorageAt").mockResolvedValue(zero);
+
+    const results = await Promise.allSettled([
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { cache, chainId: 1 }),
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { cache, chainId: 1 }),
+    ]);
+
+    expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(storage).toHaveBeenCalledTimes(4);
+    expect(cache.set).toHaveBeenCalledWith(
+      `slotseek:v1:balance:1:${token}:missing`,
+      expect.objectContaining({ maxSlots: 2 }),
+      5 * 60
+    );
+
+    missingLayoutCache.clear();
+    await expect(getErc20BalanceStorageSlot(
+      rpc, token, owner, 2, { cache, chainId: 1 }
+    )).rejects.toThrow("Unable to find balance slot");
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(storage).toHaveBeenCalledTimes(4);
+  });
+
+  it("negative-caches failed positive-allowance discovery", async () => {
+    const rpc = provider();
+    let cached: StorageLayoutCacheValue | undefined;
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockImplementation(async () => cached),
+      set: jest.fn().mockImplementation(async (_key, value) => {
+        cached = value;
+      }),
+    };
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(7));
+    const storage = jest.spyOn(rpc, "getStorageAt").mockResolvedValue(zero);
+
+    await expect(getErc20ApprovalStorageSlot(
+      rpc, token, owner, spender, 2, false, { cache, chainId: 1 }
+    )).rejects.toThrow("Approval does not exist");
+    expect(storage).toHaveBeenCalledTimes(4);
+
+    missingLayoutCache.clear();
+    await expect(getErc20ApprovalStorageSlot(
+      rpc, token, owner, spender, 2, false, { cache, chainId: 1 }
+    )).rejects.toThrow("Unable to find approval slot");
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(storage).toHaveBeenCalledTimes(4);
+  });
+
+  it("retries discovery after a negative cache entry expires", async () => {
+    const rpc = provider();
+    let now = 1_000_000;
+    jest.spyOn(Date, "now").mockImplementation(() => now);
+    let cached: StorageLayoutCacheValue | undefined = {
+      missingAt: now,
+      maxSlots: 2,
+    };
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockImplementation(async () => cached),
+      set: jest.fn().mockImplementation(async (_key, value) => {
+        cached = value;
+      }),
+    };
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(9));
+    const storage = jest.spyOn(rpc, "getStorageAt").mockImplementation(
+      async (_address, position) => position === balancePosition(owner, 0)
+        ? encoded(9)
+        : zero
+    );
+
+    await expect(getErc20BalanceStorageSlot(
+      rpc, token, owner, 2, { cache, chainId: 1 }
+    )).rejects.toThrow("Unable to find balance slot");
+    expect(call).not.toHaveBeenCalled();
+    expect(storage).not.toHaveBeenCalled();
+
+    now += 5 * 60 * 1000 + 1;
+    const result = await getErc20BalanceStorageSlot(
+      rpc, token, owner, 2, { cache, chainId: 1 }
+    );
+    expect(result.slot).toBe("0x00");
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reuse a negative entry from a shallower search", async () => {
+    const rpc = provider();
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockResolvedValue({
+        missingAt: Date.now(),
+        maxSlots: 2,
+      }),
+      set: jest.fn(),
+    };
+    jest.spyOn(rpc, "call").mockResolvedValue(encoded(9));
+    jest.spyOn(rpc, "getStorageAt").mockImplementation(
+      async (_address, position) => position === balancePosition(owner, 10)
+        ? encoded(9)
+        : zero
+    );
+
+    const result = await getErc20BalanceStorageSlot(
+      rpc, token, owner, 12, { cache, chainId: 1 }
+    );
+    expect(result.slot).toBe("0x0a");
   });
 
   it("tolerates an individual rejected storage read", async () => {
@@ -175,6 +294,37 @@ describe("verified storage layout caching", () => {
 
     const result = await getErc20BalanceStorageSlot(rpc, token, owner, 3, { chainId: 1 });
     expect(result.slot).toBe("0x01");
+  });
+
+  it("does not negative-cache an incomplete discovery with rejected reads", async () => {
+    const rpc = provider();
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockResolvedValue(undefined),
+      set: jest.fn(),
+    };
+    jest.spyOn(rpc, "call").mockResolvedValue(encoded(7));
+    jest.spyOn(rpc, "getStorageAt").mockRejectedValue(new Error("RPC unavailable"));
+
+    await expect(getErc20BalanceStorageSlot(
+      rpc, token, owner, 2, { cache, chainId: 1 }
+    )).rejects.toThrow("Unable to verify balance layout");
+    expect(cache.set).not.toHaveBeenCalled();
+  });
+
+  it("still tries the approval fallback after an incomplete primary search", async () => {
+    const rpc = provider();
+    jest.spyOn(rpc, "call").mockResolvedValue(encoded(7));
+    jest.spyOn(rpc, "getStorageAt").mockImplementation(
+      async (_address, position) => {
+        if (position === approvalPosition(owner, spender, 10)) return encoded(7);
+        throw new Error("RPC unavailable");
+      }
+    );
+
+    const result = await getErc20ApprovalStorageSlot(
+      rpc, token, owner, spender, 2, true, { chainId: 1 }
+    );
+    expect(result.slot).toBe("0x0a");
   });
 
   it("caps aggregate storage probes at eight across tokens", async () => {

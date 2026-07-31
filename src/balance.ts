@@ -3,11 +3,14 @@ import {
   balanceCache,
   getExternalLayout,
   getLocalLayout,
+  getLocalMissingLayout,
   getStorageAtLimited,
   resolveCacheContext,
   runVerifiedDiscovery,
   setExternalLayout,
+  setExternalMissingLayout,
   setLocalLayout,
+  setLocalMissingLayout,
 } from "./cache";
 import { StorageLayoutCacheOptions, VerifiedStorageLayout } from "./types";
 
@@ -109,20 +112,51 @@ export const getErc20BalanceStorageSlot = async (
 }> => {
   const context = await resolveCacheContext(provider, "balance", erc20Address, options);
   let layout = getLocalLayout(balanceCache, context.key, context.ttlSeconds);
-  if (!layout) {
-    layout = await getExternalLayout(options, context.key, context.ttlSeconds, context.timeoutMs);
-    if (layout) setLocalLayout(balanceCache, context.key, layout, context.ttlSeconds);
+  let missing = !layout && getLocalMissingLayout(
+    context.key, context.negativeTtlSeconds, maxSlots
+  );
+  if (!layout && !missing) {
+    const cached = await getExternalLayout(
+      options,
+      context.key,
+      context.ttlSeconds,
+      context.negativeTtlSeconds,
+      maxSlots,
+      context.timeoutMs
+    );
+    layout = cached.layout;
+    missing = cached.missing;
+    if (layout) {
+      setLocalLayout(balanceCache, context.key, layout, context.ttlSeconds);
+    } else if (missing) {
+      setLocalMissingLayout(
+        balanceCache, context.key, maxSlots, context.negativeTtlSeconds
+      );
+    }
   }
 
   let discoveredBalance: ethers.BigNumber | undefined;
-  if (!layout) {
-    layout = await runVerifiedDiscovery(context.key, async () => {
+  if (!layout && !missing) {
+    const discoveryKey = `${context.key}:max-slots:${maxSlots}`;
+    layout = await runVerifiedDiscovery(discoveryKey, async () => {
       const userBalance = await getErc20Balance(provider, erc20Address, holderAddress);
       if (userBalance.eq(0)) throw new Error("User has no balance");
       const discovered = await discoverBalanceLayout(
         provider, erc20Address, holderAddress, userBalance, maxSlots
       );
-      if (!discovered) throw new Error("Unable to find balance slot");
+      if (!discovered) {
+        setLocalMissingLayout(
+          balanceCache, context.key, maxSlots, context.negativeTtlSeconds
+        );
+        await setExternalMissingLayout(
+          options,
+          context.key,
+          maxSlots,
+          context.negativeTtlSeconds,
+          context.timeoutMs
+        );
+        return undefined;
+      }
       discoveredBalance = discovered.balance;
       setLocalLayout(balanceCache, context.key, discovered.layout, context.ttlSeconds);
       await setExternalLayout(
@@ -157,6 +191,7 @@ const discoverBalanceLayout = async (
   balance: ethers.BigNumber;
 } | undefined> => {
   const batchSize = 2;
+  let hadRejectedProbe = false;
   for (let start = 0; start < maxSlots; start += batchSize) {
     const candidates: Array<{ slot: number; isVyper: boolean; position: string }> = [];
     for (let slot = start; slot < Math.min(start + batchSize, maxSlots); slot++) {
@@ -176,7 +211,9 @@ const discoverBalanceLayout = async (
     ));
     for (let i = 0; i < candidates.length; i++) {
       const value = values[i];
-      if (value.status === "fulfilled" && ethers.BigNumber.from(value.value).eq(userBalance)) {
+      if (value.status === "rejected") {
+        hadRejectedProbe = true;
+      } else if (ethers.BigNumber.from(value.value).eq(userBalance)) {
         return {
           layout: {
             slot: candidates[i].slot,
@@ -187,6 +224,9 @@ const discoverBalanceLayout = async (
         };
       }
     }
+  }
+  if (hadRejectedProbe) {
+    throw new Error("Unable to verify balance layout because a storage read failed");
   }
   return undefined;
 };

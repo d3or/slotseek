@@ -3,13 +3,18 @@ import {
   approvalCache,
   getExternalLayout,
   getLocalLayout,
+  getLocalMissingLayout,
   getStorageAtLimited,
   resolveCacheContext,
   runVerifiedDiscovery,
   setExternalLayout,
+  setExternalMissingLayout,
   setLocalLayout,
+  setLocalMissingLayout,
 } from "./cache";
 import { StorageLayoutCacheOptions, VerifiedStorageLayout } from "./types";
+
+class IncompleteApprovalDiscoveryError extends Error {}
 
 /**
  * Generate mock approval data for a given ERC20 token
@@ -129,35 +134,74 @@ export const getErc20ApprovalStorageSlot = async (
 }> => {
   const context = await resolveCacheContext(provider, "approval", erc20Address, options);
   let layout = getLocalLayout(approvalCache, context.key, context.ttlSeconds);
-  if (!layout) {
-    layout = await getExternalLayout(options, context.key, context.ttlSeconds, context.timeoutMs);
-    if (layout) setLocalLayout(approvalCache, context.key, layout, context.ttlSeconds);
+  let missing = !layout && getLocalMissingLayout(
+    context.key, context.negativeTtlSeconds, maxSlots
+  );
+  if (!layout && !missing) {
+    const cached = await getExternalLayout(
+      options,
+      context.key,
+      context.ttlSeconds,
+      context.negativeTtlSeconds,
+      maxSlots,
+      context.timeoutMs
+    );
+    layout = cached.layout;
+    missing = cached.missing;
+    if (layout) {
+      setLocalLayout(approvalCache, context.key, layout, context.ttlSeconds);
+    } else if (missing) {
+      setLocalMissingLayout(
+        approvalCache, context.key, maxSlots, context.negativeTtlSeconds
+      );
+    }
   }
 
   let approval: ethers.BigNumber | undefined;
-  if (!layout) {
-    layout = await runVerifiedDiscovery(context.key, async () => {
-      approval = await getErc20Approval(
-        provider, erc20Address, ownerAddress, spenderAddress
-      );
-      if (approval.eq(0)) return undefined;
-      const discovered = await discoverApprovalLayout(
-        provider, erc20Address, ownerAddress, spenderAddress, approval, maxSlots
-      );
-      if (!discovered) return undefined;
-      setLocalLayout(approvalCache, context.key, discovered, context.ttlSeconds);
-      await setExternalLayout(
-        options, context.key, discovered, context.ttlSeconds, context.timeoutMs
-      );
-      return discovered;
-    });
+  if (!layout && !missing) {
+    const discoveryKey = `${context.key}:max-slots:${maxSlots}`;
+    try {
+      layout = await runVerifiedDiscovery(discoveryKey, async () => {
+        approval = await getErc20Approval(
+          provider, erc20Address, ownerAddress, spenderAddress
+        );
+        if (approval.eq(0)) return undefined;
+        const discovered = await discoverApprovalLayout(
+          provider, erc20Address, ownerAddress, spenderAddress, approval, maxSlots
+        );
+        if (!discovered) {
+          setLocalMissingLayout(
+            approvalCache, context.key, maxSlots, context.negativeTtlSeconds
+          );
+          await setExternalMissingLayout(
+            options,
+            context.key,
+            maxSlots,
+            context.negativeTtlSeconds,
+            context.timeoutMs
+          );
+          return undefined;
+        }
+        setLocalLayout(approvalCache, context.key, discovered, context.ttlSeconds);
+        await setExternalLayout(
+          options, context.key, discovered, context.ttlSeconds, context.timeoutMs
+        );
+        return discovered;
+      });
+    } catch (error) {
+      if (!useFallbackSlot || !(error instanceof IncompleteApprovalDiscoveryError)) {
+        throw error;
+      }
+    }
   }
 
   if (!layout && useFallbackSlot) {
     approval ??= await getErc20Approval(provider, erc20Address, ownerAddress, spenderAddress);
-    layout = await findApprovalFallback(
-      provider, erc20Address, ownerAddress, spenderAddress, approval
-    );
+    layout = approval.eq(0)
+      ? { slot: 10, isVyper: false, verifiedAt: Date.now() }
+      : await findApprovalFallback(
+        provider, erc20Address, ownerAddress, spenderAddress, approval
+      );
     // Zero equality is only a caller-specific fallback guess, never a verified layout.
     if (layout && approval.gt(0)) {
       setLocalLayout(approvalCache, context.key, layout, context.ttlSeconds);
@@ -190,6 +234,7 @@ const discoverApprovalLayout = async (
   maxSlots: number
 ): Promise<VerifiedStorageLayout | undefined> => {
   const batchSize = 2;
+  let hadRejectedProbe = false;
   for (let start = 0; start < maxSlots; start += batchSize) {
     const candidates: Array<{ slot: number; isVyper: boolean; position: string }> = [];
     for (let slot = start; slot < Math.min(start + batchSize, maxSlots); slot++) {
@@ -203,10 +248,17 @@ const discoverApprovalLayout = async (
     ));
     for (let i = 0; i < candidates.length; i++) {
       const value = values[i];
-      if (value.status === "fulfilled" && ethers.BigNumber.from(value.value).eq(approval)) {
+      if (value.status === "rejected") {
+        hadRejectedProbe = true;
+      } else if (ethers.BigNumber.from(value.value).eq(approval)) {
         return { slot: candidates[i].slot, isVyper: candidates[i].isVyper, verifiedAt: Date.now() };
       }
     }
+  }
+  if (hadRejectedProbe) {
+    throw new IncompleteApprovalDiscoveryError(
+      "Unable to verify approval layout because a storage read failed"
+    );
   }
   return undefined;
 };
