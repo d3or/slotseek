@@ -1,15 +1,25 @@
 import { ethers } from "ethers";
 import {
   approvalCache,
+  emitCacheEvent,
   getExternalLayout,
   getLocalLayout,
   getStorageAtLimited,
+  isNegativeStorageLayout,
   resolveCacheContext,
   runVerifiedDiscovery,
   setExternalLayout,
   setLocalLayout,
+  setLocalNegative,
 } from "./cache";
-import { StorageLayoutCacheOptions, VerifiedStorageLayout } from "./types";
+import {
+  NegativeStorageLayout,
+  StorageLayoutCacheOptions,
+  StoredStorageLayout,
+  VerifiedStorageLayout,
+} from "./types";
+
+const FALLBACK_APPROVAL_SLOT = 10;
 
 /**
  * Generate mock approval data for a given ERC20 token
@@ -128,42 +138,124 @@ export const getErc20ApprovalStorageSlot = async (
   isVyper: boolean;
 }> => {
   const context = await resolveCacheContext(provider, "approval", erc20Address, options);
-  let layout = getLocalLayout(approvalCache, context.key, context.ttlSeconds);
-  if (!layout) {
-    layout = await getExternalLayout(options, context.key, context.ttlSeconds, context.timeoutMs);
-    if (layout) setLocalLayout(approvalCache, context.key, layout, context.ttlSeconds);
+  let entry: StoredStorageLayout | undefined =
+    getLocalLayout(approvalCache, context.key, context.ttlSeconds, context.negativeTtlSeconds);
+  if (entry) {
+    emitCacheEvent(
+      options,
+      context,
+      isNegativeStorageLayout(entry) ? "negative_hit" : "local_hit",
+      isNegativeStorageLayout(entry) ? entry.reason : undefined
+    );
+  }
+  if (!entry) {
+    entry = await getExternalLayout(options, context);
+    if (entry) {
+      if (isNegativeStorageLayout(entry)) {
+        setLocalNegative(approvalCache, context.key, entry, context.negativeTtlSeconds);
+        emitCacheEvent(options, context, "negative_hit", entry.reason);
+      } else {
+        setLocalLayout(approvalCache, context.key, entry, context.ttlSeconds);
+        emitCacheEvent(options, context, "external_hit");
+      }
+    }
   }
 
   let approval: ethers.BigNumber | undefined;
-  if (!layout) {
-    layout = await runVerifiedDiscovery(context.key, async () => {
+  if (entry && isNegativeStorageLayout(entry)) {
+    if (entry.reason === "zero-allowance") {
+      // The marker is token-global but allowance is owner/spender-specific.
+      // Verify the current pair with a single eth_call before honoring it: a
+      // pair with a positive allowance must not be routed to the fallback slot.
       approval = await getErc20Approval(
         provider, erc20Address, ownerAddress, spenderAddress
       );
-      if (approval.eq(0)) return undefined;
-      const discovered = await discoverApprovalLayout(
+      if (approval.gt(0)) entry = undefined;
+    } else if (
+      entry.reason === "not-found" &&
+      (entry.maxSlots ?? 0) < maxSlots
+    ) {
+      // The failed search used a smaller probe budget than this caller; retry.
+      entry = undefined;
+    }
+  }
+
+  if (!entry) {
+    const discoveryKey =
+      `${context.key}:${ownerAddress.toLowerCase()}:${spenderAddress.toLowerCase()}:${maxSlots}`;
+    entry = await runVerifiedDiscovery(discoveryKey, async () => {
+      approval = approval ?? await getErc20Approval(
+        provider, erc20Address, ownerAddress, spenderAddress
+      );
+      if (approval.eq(0)) {
+        // No reference value exists to verify against. Cache the negative so
+        // subsequent quotes skip the fallback probes.
+        const failedAt = Date.now();
+        const marker: NegativeStorageLayout = {
+          status: "unverifiable",
+          reason: "zero-allowance",
+          failedAt,
+          expiresAt: failedAt + context.negativeTtlSeconds * 1000,
+        };
+        setLocalNegative(approvalCache, context.key, marker, context.negativeTtlSeconds);
+        await setExternalLayout(options, context, marker, context.negativeTtlSeconds);
+        emitCacheEvent(options, context, "discovery_failed", "zero-allowance");
+        return marker;
+      }
+      const { layout: discovered, incomplete } = await discoverApprovalLayout(
         provider, erc20Address, ownerAddress, spenderAddress, approval, maxSlots
       );
-      if (!discovered) return undefined;
+      if (!discovered) {
+        if (incomplete) {
+          // Some probes failed (rate limit, provider error); the matching slot
+          // may be among them. Do not poison the negative cache.
+          return undefined;
+        }
+        const failedAt = Date.now();
+        const marker: NegativeStorageLayout = {
+          status: "unverifiable",
+          reason: "not-found",
+          failedAt,
+          expiresAt: failedAt + context.negativeTtlSeconds * 1000,
+          maxSlots,
+        };
+        setLocalNegative(approvalCache, context.key, marker, context.negativeTtlSeconds);
+        await setExternalLayout(options, context, marker, context.negativeTtlSeconds);
+        emitCacheEvent(options, context, "discovery_failed", "not-found");
+        return marker;
+      }
       setLocalLayout(approvalCache, context.key, discovered, context.ttlSeconds);
-      await setExternalLayout(
-        options, context.key, discovered, context.ttlSeconds, context.timeoutMs
-      );
+      await setExternalLayout(options, context, discovered, context.ttlSeconds);
+      emitCacheEvent(options, context, "verified");
       return discovered;
     });
   }
 
+  const negative = entry && isNegativeStorageLayout(entry) ? entry : undefined;
+  let layout: VerifiedStorageLayout | undefined =
+    entry && !isNegativeStorageLayout(entry) ? entry : undefined;
+
   if (!layout && useFallbackSlot) {
-    approval ??= await getErc20Approval(provider, erc20Address, ownerAddress, spenderAddress);
-    layout = await findApprovalFallback(
-      provider, erc20Address, ownerAddress, spenderAddress, approval
-    );
-    // Zero equality is only a caller-specific fallback guess, never a verified layout.
-    if (layout && approval.gt(0)) {
-      setLocalLayout(approvalCache, context.key, layout, context.ttlSeconds);
-      await setExternalLayout(
-        options, context.key, layout, context.ttlSeconds, context.timeoutMs
+    if (negative?.reason === "zero-allowance") {
+      // Already verified zero for this pair (cache hit path reads it, and
+      // in-flight discovery is shared per owner/spender pair).
+      approval ??= ethers.constants.Zero;
+    } else {
+      approval ??= await getErc20Approval(provider, erc20Address, ownerAddress, spenderAddress);
+    }
+    if (approval.isZero()) {
+      // A zero allowance trivially matches the empty fallback position, so
+      // probing storage adds no information; return the guess without RPC.
+      layout = { slot: FALLBACK_APPROVAL_SLOT, isVyper: false, verifiedAt: Date.now() };
+    } else {
+      layout = await findApprovalFallback(
+        provider, erc20Address, ownerAddress, spenderAddress, approval
       );
+      // Zero equality is only a caller-specific fallback guess, never a verified layout.
+      if (layout) {
+        setLocalLayout(approvalCache, context.key, layout, context.ttlSeconds);
+        await setExternalLayout(options, context, layout, context.ttlSeconds);
+      }
     }
   }
 
@@ -188,8 +280,9 @@ const discoverApprovalLayout = async (
   spenderAddress: string,
   approval: ethers.BigNumber,
   maxSlots: number
-): Promise<VerifiedStorageLayout | undefined> => {
+): Promise<{ layout?: VerifiedStorageLayout; incomplete: boolean }> => {
   const batchSize = 2;
+  let incomplete = false;
   for (let start = 0; start < maxSlots; start += batchSize) {
     const candidates: Array<{ slot: number; isVyper: boolean; position: string }> = [];
     for (let slot = start; slot < Math.min(start + batchSize, maxSlots); slot++) {
@@ -203,12 +296,19 @@ const discoverApprovalLayout = async (
     ));
     for (let i = 0; i < candidates.length; i++) {
       const value = values[i];
-      if (value.status === "fulfilled" && ethers.BigNumber.from(value.value).eq(approval)) {
-        return { slot: candidates[i].slot, isVyper: candidates[i].isVyper, verifiedAt: Date.now() };
+      if (value.status === "rejected") {
+        // The matching slot may be among failed reads; the caller must treat
+        // an exhausted-but-incomplete search as transient, not "not-found".
+        incomplete = true;
+      } else if (ethers.BigNumber.from(value.value).eq(approval)) {
+        return {
+          layout: { slot: candidates[i].slot, isVyper: candidates[i].isVyper, verifiedAt: Date.now() },
+          incomplete: false,
+        };
       }
     }
   }
-  return undefined;
+  return { layout: undefined, incomplete };
 };
 
 const findApprovalFallback = async (
@@ -218,7 +318,7 @@ const findApprovalFallback = async (
   spenderAddress: string,
   approval: ethers.BigNumber
 ): Promise<VerifiedStorageLayout | undefined> => {
-  const slot = 10;
+  const slot = FALLBACK_APPROVAL_SLOT;
   const solidityPosition = calculateApprovalSolidityStorageSlot(
     ownerAddress, spenderAddress, slot
   ).storageSlot;

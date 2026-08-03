@@ -57,10 +57,61 @@ await generateMockBalanceData(provider, {
 ```
 
 Keys are versioned and scoped by layout kind, chain ID, and lowercased token.
-Only layouts verified against a positive on-chain balance or allowance are cached.
-Malformed, expired, failed, or slow cache reads are treated as misses, and cache
-write failures never fail slot discovery. Zero-allowance fallback guesses are not
-cached or shared as verified discoveries.
+Layouts verified against a positive on-chain balance or allowance are cached with
+the long `cacheTtlSeconds` TTL (default 7 days). Malformed, expired, failed, or
+slow cache reads are treated as misses, and cache write failures never fail slot
+discovery.
+
+### Negative caching
+
+Failed discoveries are also cached, with a short TTL
+(`negativeCacheTtlSeconds`, default 15 minutes), so repeated quotes for
+unsupported tokens do not re-run the full storage probe on every call:
+
+- Approval discovery that finds a zero allowance (reason `zero-allowance`) or
+  exhausts all probes (reason `not-found`) writes a negative marker. Markers
+  are keyed by `(kind, chainId, token)`, but allowance is owner/spender
+  specific, so a fresh `zero-allowance` hit re-checks the current pair with a
+  single `allowance()` call: if it is still zero the caller receives the
+  fallback approval slot (10) with no storage probes; if it is positive the
+  marker is ignored and full discovery runs for that pair.
+- Balance discovery that exhausts all probes despite a positive on-chain
+  balance writes a `not-found` marker, and fresh hits fail fast without RPC.
+  Zero-balance outcomes are holder-specific and are never negative-cached.
+- `not-found` markers record the probe budget (`maxSlots`) used; a caller
+  searching more slots than the marker covered ignores it and retries.
+- A search in which any storage probe rejected (rate limit, provider error) is
+  treated as transient and never negative-cached.
+- Negative markers carry an absolute `expiresAt` set by the writer; readers
+  honor the minimum of that and their own `negativeCacheTtlSeconds`, so a
+  marker never outlives its writer's TTL. After expiry, discovery runs again.
+- Concurrent callers of the same discovery (same token, and same
+  holder/owner/spender and probe budget) share the in-flight result, including
+  failures and rejections, so a burst of identical quotes performs at most one
+  probe sequence.
+
+### Observability
+
+Pass `onCacheEvent` to receive structured cache telemetry for wiring into
+metrics or logs. Events carry `type`, `kind` (`balance` / `approval`),
+`chainId`, `tokenAddress`, and (for negative outcomes) `reason`. Event types:
+
+- `local_hit` - served from the in-process cache
+- `external_hit` - served from the application-provided cache adapter
+- `negative_hit` - a fresh negative marker was consumed
+- `verified` - discovery succeeded and the layout was cached
+- `discovery_failed` - discovery failed and a negative outcome was recorded
+- `cache_error` - the external adapter threw or timed out (fail-open)
+
+The callback may be sync or async; exceptions and rejections are swallowed.
+
+```typescript
+await generateMockApprovalData(provider, {
+  ...args,
+  cache,
+  onCacheEvent: (event) => metrics.increment(`slotseek.cache.${event.type}`),
+});
+```
 
 ## TODO
 

@@ -1,9 +1,18 @@
 import { approvalCache, balanceCache } from './cache';
-import { getStorageLayoutCacheKey } from "./cache";
 import {
+  DEFAULT_NEGATIVE_CACHE_TTL_SECONDS,
+  getStorageLayoutCacheKey,
+  isNegativeStorageLayout,
+} from "./cache";
+import {
+  NegativeLayoutReason,
+  NegativeStorageLayout,
   StorageLayoutCacheAdapter,
+  StorageLayoutCacheEvent,
+  StorageLayoutCacheEventType,
   StorageLayoutCacheOptions,
   StorageLayoutKind,
+  StoredStorageLayout,
   VerifiedStorageLayout,
 } from "./types";
 import {
@@ -33,9 +42,16 @@ export {
 };
 
 export {
+  DEFAULT_NEGATIVE_CACHE_TTL_SECONDS,
   getStorageLayoutCacheKey,
+  isNegativeStorageLayout,
+  NegativeLayoutReason,
+  NegativeStorageLayout,
   StorageLayoutCacheAdapter,
+  StorageLayoutCacheEvent,
+  StorageLayoutCacheEventType,
   StorageLayoutCacheOptions,
   StorageLayoutKind,
+  StoredStorageLayout,
   VerifiedStorageLayout,
 };
