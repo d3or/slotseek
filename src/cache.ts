@@ -1,14 +1,19 @@
 import { ethers } from "ethers";
 import {
   CacheMapType,
+  NegativeLayoutReason,
+  NegativeStorageLayout,
+  StorageLayoutCacheEventType,
   StorageLayoutCacheOptions,
   StorageLayoutKind,
+  StoredStorageLayout,
   VerifiedStorageLayout,
 } from "./types";
 
 // check every minute
 const CACHE_INTERVAL = 60 * 1000;
 export const DEFAULT_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
+export const DEFAULT_NEGATIVE_CACHE_TTL_SECONDS = 15 * 60;
 export const DEFAULT_CACHE_TIMEOUT_MS = 200;
 const CACHE_KEY_VERSION = "v1";
 
@@ -30,11 +35,41 @@ export const resolveCacheContext = async (
   const chainId = options.chainId ?? (await provider.getNetwork()).chainId;
   const ttlSeconds = options.cacheTtlSeconds ?? DEFAULT_CACHE_TTL_SECONDS;
   return {
+    kind,
     chainId,
+    tokenAddress,
     ttlSeconds,
+    negativeTtlSeconds:
+      options.negativeCacheTtlSeconds ?? DEFAULT_NEGATIVE_CACHE_TTL_SECONDS,
     timeoutMs: options.cacheTimeoutMs ?? DEFAULT_CACHE_TIMEOUT_MS,
     key: getStorageLayoutCacheKey(kind, chainId, tokenAddress),
   };
+};
+
+export type StorageLayoutCacheContext = Awaited<
+  ReturnType<typeof resolveCacheContext>
+>;
+
+export const emitCacheEvent = (
+  options: StorageLayoutCacheOptions,
+  context: StorageLayoutCacheContext,
+  type: StorageLayoutCacheEventType,
+  reason?: NegativeLayoutReason
+) => {
+  if (!options.onCacheEvent) return;
+  try {
+    const result = options.onCacheEvent({
+      type,
+      kind: context.kind,
+      chainId: context.chainId,
+      tokenAddress: context.tokenAddress,
+      reason,
+    });
+    // An async callback that rejects must not surface as an unhandled rejection.
+    void Promise.resolve(result).catch(() => {});
+  } catch {
+    // Observability must never affect slot discovery.
+  }
 };
 
 const withDeadline = async <T>(operation: Promise<T>, timeoutMs: number): Promise<T> => {
@@ -62,48 +97,107 @@ export const isVerifiedStorageLayout = (
     Date.now() - layout.verifiedAt < ttlSeconds * 1000;
 };
 
+const NEGATIVE_LAYOUT_REASONS: NegativeLayoutReason[] = [
+  "zero-allowance",
+  "no-balance",
+  "not-found",
+];
+
+// Structural check only; use isFreshNegativeStorageLayout for cached values.
+export const isNegativeStorageLayout = (
+  value: unknown
+): value is NegativeStorageLayout => {
+  if (!value || typeof value !== "object") return false;
+  const marker = value as NegativeStorageLayout;
+  return marker.status === "unverifiable" &&
+    NEGATIVE_LAYOUT_REASONS.includes(marker.reason) &&
+    typeof marker.failedAt === "number" && Number.isFinite(marker.failedAt);
+};
+
+export const isFreshNegativeStorageLayout = (
+  value: unknown,
+  negativeTtlSeconds: number
+): value is NegativeStorageLayout => {
+  if (!isNegativeStorageLayout(value)) return false;
+  // Honor the writer's absolute expiry when present so a marker written with a
+  // short TTL is never extended by a reader configured with a longer one.
+  const expiresAt = Math.min(
+    typeof value.expiresAt === "number" ? value.expiresAt : Infinity,
+    value.failedAt + negativeTtlSeconds * 1000
+  );
+  return value.failedAt <= Date.now() && Date.now() < expiresAt;
+};
+
 export const getExternalLayout = async (
   options: StorageLayoutCacheOptions,
-  key: string,
-  ttlSeconds: number,
-  timeoutMs: number
-): Promise<VerifiedStorageLayout | undefined> => {
+  context: StorageLayoutCacheContext
+): Promise<StoredStorageLayout | undefined> => {
   if (!options.cache) return undefined;
   try {
-    const value = await withDeadline(options.cache.get(key), timeoutMs);
-    return isVerifiedStorageLayout(value, ttlSeconds) ? value : undefined;
+    const value = await withDeadline(
+      options.cache.get(context.key),
+      context.timeoutMs
+    );
+    if (isVerifiedStorageLayout(value, context.ttlSeconds)) return value;
+    if (isFreshNegativeStorageLayout(value, context.negativeTtlSeconds)) {
+      return value;
+    }
+    return undefined;
   } catch {
+    emitCacheEvent(options, context, "cache_error");
     return undefined;
   }
 };
 
 export const setExternalLayout = async (
   options: StorageLayoutCacheOptions,
-  key: string,
-  value: VerifiedStorageLayout,
-  ttlSeconds: number,
-  timeoutMs: number
+  context: StorageLayoutCacheContext,
+  value: StoredStorageLayout,
+  ttlSeconds: number
 ) => {
   if (!options.cache) return;
   try {
-    await withDeadline(options.cache.set(key, value, ttlSeconds), timeoutMs);
+    await withDeadline(
+      options.cache.set(context.key, value, ttlSeconds),
+      context.timeoutMs
+    );
   } catch {
     // Application cache failures must never affect slot discovery.
+    emitCacheEvent(options, context, "cache_error");
   }
 };
 
 export const getLocalLayout = (
   cache: CacheMapType,
   key: string,
-  ttlSeconds: number
-): VerifiedStorageLayout | undefined => {
+  ttlSeconds: number,
+  negativeTtlSeconds: number = DEFAULT_NEGATIVE_CACHE_TTL_SECONDS
+): StoredStorageLayout | undefined => {
   const value = cache.get(key);
-  const callerExpiresAt = value ? value.ts + ttlSeconds * 1000 : 0;
-  const expiresAt = value?.expiresAt
+  if (!value) return undefined;
+  if ("negative" in value) {
+    const expiresAt = Math.min(
+      value.expiresAt,
+      value.ts + negativeTtlSeconds * 1000
+    );
+    if (Date.now() >= expiresAt) {
+      cache.delete(key);
+      return undefined;
+    }
+    return {
+      status: "unverifiable",
+      reason: value.reason,
+      failedAt: value.ts,
+      expiresAt: value.expiresAt,
+      maxSlots: value.maxSlots,
+    };
+  }
+  const callerExpiresAt = value.ts + ttlSeconds * 1000;
+  const expiresAt = value.expiresAt
     ? Math.min(value.expiresAt, callerExpiresAt)
     : callerExpiresAt;
-  if (!value || Date.now() >= expiresAt) {
-    if (value) cache.delete(key);
+  if (Date.now() >= expiresAt) {
+    cache.delete(key);
     return undefined;
   }
   return { slot: value.slot, isVyper: value.isVyper, verifiedAt: value.ts };
@@ -121,21 +215,34 @@ export const setLocalLayout = (
   expiresAt: value.verifiedAt + ttlSeconds * 1000,
 });
 
-const discoveryPromises = new Map<string, Promise<VerifiedStorageLayout | undefined>>();
+export const setLocalNegative = (
+  cache: CacheMapType,
+  key: string,
+  value: NegativeStorageLayout,
+  negativeTtlSeconds: number
+) => cache.set(key, {
+  negative: true,
+  reason: value.reason,
+  ts: value.failedAt,
+  expiresAt: Math.min(
+    typeof value.expiresAt === "number" ? value.expiresAt : Infinity,
+    value.failedAt + negativeTtlSeconds * 1000
+  ),
+  maxSlots: value.maxSlots,
+});
+
+const discoveryPromises = new Map<string, Promise<StoredStorageLayout | undefined>>();
 
 export const runVerifiedDiscovery = async (
   key: string,
-  discover: () => Promise<VerifiedStorageLayout | undefined>
-) => {
+  discover: () => Promise<StoredStorageLayout | undefined>
+): Promise<StoredStorageLayout | undefined> => {
   const existing = discoveryPromises.get(key);
   if (existing) {
-    try {
-      const shared = await existing;
-      if (shared) return shared;
-    } catch {
-      // Only successful, verified discoveries are safe to share.
-    }
-    return discover();
+    // Share the leader's outcome - including negative ("unverifiable") markers
+    // and rejections - so concurrent callers never re-run the probe brute force
+    // and identical requests observe identical results.
+    return existing;
   }
   const pending = discover().finally(() => discoveryPromises.delete(key));
   discoveryPromises.set(key, pending);

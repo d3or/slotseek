@@ -144,7 +144,7 @@ describe("verified storage layout caching", () => {
     expect(call).toHaveBeenCalledTimes(2);
   });
 
-  it("does not cache or share a zero-allowance fallback as verified", async () => {
+  it("caches a zero-allowance outcome and skips storage probes afterwards", async () => {
     const rpc = provider();
     const cache: StorageLayoutCacheAdapter = {
       get: jest.fn().mockResolvedValue(undefined),
@@ -153,16 +153,273 @@ describe("verified storage layout caching", () => {
     const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(0));
     const storage = jest.spyOn(rpc, "getStorageAt").mockResolvedValue(zero);
 
-    const results = await Promise.all([
-      getErc20ApprovalStorageSlot(rpc, token, owner, spender, 2, true, { cache, chainId: 1 }),
-      getErc20ApprovalStorageSlot(rpc, token, owner, spender, 2, true, { cache, chainId: 1 }),
+    const first = await getErc20ApprovalStorageSlot(
+      rpc, token, owner, spender, 2, true, { cache, chainId: 1 }
+    );
+    const second = await getErc20ApprovalStorageSlot(
+      rpc, token, owner, spender, 2, true, { cache, chainId: 1 }
+    );
+
+    expect([first.slot, second.slot]).toEqual(["0x0a", "0x0a"]);
+    // One allowance read per call (the marker is re-verified per pair), but
+    // the zero-allowance fallback never probes storage.
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(storage).not.toHaveBeenCalled();
+    expect(cache.set).toHaveBeenCalledTimes(1);
+    expect(cache.set).toHaveBeenCalledWith(
+      `slotseek:v1:approval:1:${token}`,
+      expect.objectContaining({ status: "unverifiable", reason: "zero-allowance" }),
+      15 * 60
+    );
+  });
+
+  it("serves an external negative marker with one allowance read and no probes", async () => {
+    const rpc = provider();
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockResolvedValue({
+        status: "unverifiable",
+        reason: "zero-allowance",
+        failedAt: Date.now(),
+      }),
+      set: jest.fn(),
+    };
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(0));
+    const storage = jest.spyOn(rpc, "getStorageAt");
+
+    const result = await getErc20ApprovalStorageSlot(
+      rpc, token, owner, spender, 2, true, { cache, chainId: 1 }
+    );
+
+    expect(result.slot).toBe("0x0a");
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(storage).not.toHaveBeenCalled();
+  });
+
+  it("ignores a zero-allowance marker for a pair with a positive allowance", async () => {
+    const rpc = provider();
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockResolvedValue({
+        status: "unverifiable",
+        reason: "zero-allowance",
+        failedAt: Date.now(),
+      }),
+      set: jest.fn(),
+    };
+    jest.spyOn(rpc, "call").mockResolvedValue(encoded(11));
+    jest.spyOn(rpc, "getStorageAt").mockImplementation(async (_address, position) =>
+      position === approvalPosition(owner, spender, 1) ? encoded(11) : zero
+    );
+
+    const result = await getErc20ApprovalStorageSlot(
+      rpc, token, owner, spender, 3, true, { cache, chainId: 1 }
+    );
+
+    // The token-global marker must not route a verifiable pair to the fallback slot.
+    expect(result.slot).toBe("0x01");
+    expect(result.isVyper).toBe(false);
+    expect(cache.set).toHaveBeenCalledWith(
+      `slotseek:v1:approval:1:${token}`,
+      expect.objectContaining({ slot: 1, isVyper: false }),
+      expect.any(Number)
+    );
+  });
+
+  it("retries discovery after the negative TTL expires", async () => {
+    const rpc = provider();
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(0));
+    jest.spyOn(rpc, "getStorageAt").mockResolvedValue(zero);
+    const now = jest.spyOn(Date, "now").mockReturnValue(1_000_000);
+
+    await getErc20ApprovalStorageSlot(rpc, token, owner, spender, 2, true, {
+      chainId: 1,
+      negativeCacheTtlSeconds: 60,
+    });
+    now.mockReturnValue(1_000_000 + 61 * 1000);
+    await getErc20ApprovalStorageSlot(rpc, token, owner, spender, 2, true, {
+      chainId: 1,
+      negativeCacheTtlSeconds: 60,
+    });
+
+    expect(call).toHaveBeenCalledTimes(2);
+  });
+
+  it("caches a failed balance discovery and fails fast afterwards", async () => {
+    const rpc = provider();
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockResolvedValue(undefined),
+      set: jest.fn(),
+    };
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(9));
+    const storage = jest.spyOn(rpc, "getStorageAt").mockResolvedValue(zero);
+
+    await expect(
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { cache, chainId: 1 })
+    ).rejects.toThrow("Unable to find balance slot");
+    const probesAfterDiscovery = storage.mock.calls.length;
+    await expect(
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { cache, chainId: 1 })
+    ).rejects.toThrow("Unable to find balance slot");
+
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(storage).toHaveBeenCalledTimes(probesAfterDiscovery);
+    expect(cache.set).toHaveBeenCalledWith(
+      `slotseek:v1:balance:1:${token}`,
+      expect.objectContaining({ status: "unverifiable", reason: "not-found" }),
+      15 * 60
+    );
+  });
+
+  it("does not cache a zero-balance holder outcome", async () => {
+    const rpc = provider();
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockResolvedValue(undefined),
+      set: jest.fn(),
+    };
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(0));
+
+    await expect(
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { cache, chainId: 1 })
+    ).rejects.toThrow("User has no balance");
+    await expect(
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { cache, chainId: 1 })
+    ).rejects.toThrow("User has no balance");
+
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(cache.set).not.toHaveBeenCalled();
+    expect(balanceCache.size).toBe(0);
+  });
+
+  it("shares a failed discovery with concurrent callers instead of re-probing", async () => {
+    const rpc = provider();
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(0));
+    const storage = jest.spyOn(rpc, "getStorageAt");
+
+    const results = await Promise.allSettled([
+      getErc20BalanceStorageSlot(rpc, token, owner, 4, { chainId: 1 }),
+      getErc20BalanceStorageSlot(rpc, token, owner, 4, { chainId: 1 }),
     ]);
 
-    expect(results.map((result) => result.slot)).toEqual(["0x0a", "0x0a"]);
+    expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(storage).not.toHaveBeenCalled();
+  });
+
+  it("emits cache observability events", async () => {
+    const rpc = provider();
+    const events: Array<{ type: string; reason?: string }> = [];
+    const onCacheEvent = (event: { type: string; reason?: string }) => {
+      events.push({ type: event.type, reason: event.reason });
+    };
+    jest.spyOn(rpc, "call").mockResolvedValue(encoded(0));
+    jest.spyOn(rpc, "getStorageAt").mockResolvedValue(zero);
+
+    await getErc20ApprovalStorageSlot(
+      rpc, token, owner, spender, 2, true, { chainId: 1, onCacheEvent }
+    );
+    await getErc20ApprovalStorageSlot(
+      rpc, token, owner, spender, 2, true, { chainId: 1, onCacheEvent }
+    );
+
+    expect(events).toEqual([
+      { type: "discovery_failed", reason: "zero-allowance" },
+      { type: "negative_hit", reason: "zero-allowance" },
+    ]);
+  });
+
+  it("does not negative-cache a search with rejected probes", async () => {
+    const rpc = provider();
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockResolvedValue(undefined),
+      set: jest.fn(),
+    };
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(9));
+    const storage = jest.spyOn(rpc, "getStorageAt")
+      .mockRejectedValue(new Error("rate limited"));
+
+    await expect(
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { cache, chainId: 1 })
+    ).rejects.toThrow("Unable to find balance slot");
+    const probesAfterFirst = storage.mock.calls.length;
+    await expect(
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { cache, chainId: 1 })
+    ).rejects.toThrow("Unable to find balance slot");
+
+    // The transient failure is retried, not served from a poisoned negative cache.
     expect(call).toHaveBeenCalledTimes(2);
-    expect(storage).toHaveBeenCalledTimes(2);
+    expect(storage.mock.calls.length).toBe(probesAfterFirst * 2);
     expect(cache.set).not.toHaveBeenCalled();
-    expect(approvalCache.size).toBe(0);
+    expect(balanceCache.size).toBe(0);
+  });
+
+  it("re-runs a not-found discovery when the caller searches more slots", async () => {
+    const rpc = provider();
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(9));
+    const storage = jest.spyOn(rpc, "getStorageAt").mockImplementation(
+      async (_address, position) =>
+        position === balancePosition(owner, 3) ? encoded(9) : zero
+    );
+
+    await expect(
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { chainId: 1 })
+    ).rejects.toThrow("Unable to find balance slot");
+    const result = await getErc20BalanceStorageSlot(rpc, token, owner, 6, { chainId: 1 });
+
+    // The maxSlots=2 marker must not suppress the deeper maxSlots=6 search.
+    expect(result.slot).toBe("0x03");
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(storage.mock.calls.length).toBeGreaterThan(4);
+  });
+
+  it("never extends an external negative marker past its writer's TTL", async () => {
+    const rpc = provider();
+    const now = Date.now();
+    // Written by a process configured with a 60s negative TTL, 2 minutes ago.
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockResolvedValue({
+        status: "unverifiable",
+        reason: "not-found",
+        failedAt: now - 2 * 60 * 1000,
+        expiresAt: now - 60 * 1000,
+        maxSlots: 2,
+      }),
+      set: jest.fn(),
+    };
+    const call = jest.spyOn(rpc, "call").mockResolvedValue(encoded(9));
+    jest.spyOn(rpc, "getStorageAt").mockImplementation(async (_address, position) =>
+      position === balancePosition(owner, 0) ? encoded(9) : zero
+    );
+
+    // A reader with the default 15-minute TTL must treat the marker as expired.
+    const result = await getErc20BalanceStorageSlot(rpc, token, owner, 2, {
+      cache,
+      chainId: 1,
+    });
+
+    expect(result.slot).toBe("0x00");
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates the leader's rejection to concurrent waiters and retries after", async () => {
+    const rpc = provider();
+    const call = jest.spyOn(rpc, "call")
+      .mockRejectedValueOnce(new Error("provider down"))
+      .mockResolvedValue(encoded(9));
+    jest.spyOn(rpc, "getStorageAt").mockImplementation(async (_address, position) =>
+      position === balancePosition(owner, 0) ? encoded(9) : zero
+    );
+
+    const results = await Promise.allSettled([
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { chainId: 1 }),
+      getErc20BalanceStorageSlot(rpc, token, owner, 2, { chainId: 1 }),
+    ]);
+    expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+    expect((results[0] as PromiseRejectedResult).reason.message).toContain("provider down");
+    expect((results[1] as PromiseRejectedResult).reason.message).toContain("provider down");
+    expect(call).toHaveBeenCalledTimes(1);
+
+    // The failed in-flight discovery is not sticky; the next call succeeds.
+    const retried = await getErc20BalanceStorageSlot(rpc, token, owner, 2, { chainId: 1 });
+    expect(retried.slot).toBe("0x00");
   });
 
   it("tolerates an individual rejected storage read", async () => {

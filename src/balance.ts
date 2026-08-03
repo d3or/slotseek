@@ -1,15 +1,23 @@
 import { ethers } from "ethers";
 import {
   balanceCache,
+  emitCacheEvent,
   getExternalLayout,
   getLocalLayout,
   getStorageAtLimited,
+  isNegativeStorageLayout,
   resolveCacheContext,
   runVerifiedDiscovery,
   setExternalLayout,
   setLocalLayout,
+  setLocalNegative,
 } from "./cache";
-import { StorageLayoutCacheOptions, VerifiedStorageLayout } from "./types";
+import {
+  NegativeStorageLayout,
+  StorageLayoutCacheOptions,
+  StoredStorageLayout,
+  VerifiedStorageLayout,
+} from "./types";
 
 /**
  * Generate mock data for a given ERC20 token balance
@@ -108,31 +116,92 @@ export const getErc20BalanceStorageSlot = async (
   isVyper: boolean;
 }> => {
   const context = await resolveCacheContext(provider, "balance", erc20Address, options);
-  let layout = getLocalLayout(balanceCache, context.key, context.ttlSeconds);
-  if (!layout) {
-    layout = await getExternalLayout(options, context.key, context.ttlSeconds, context.timeoutMs);
-    if (layout) setLocalLayout(balanceCache, context.key, layout, context.ttlSeconds);
+  let entry: StoredStorageLayout | undefined =
+    getLocalLayout(balanceCache, context.key, context.ttlSeconds, context.negativeTtlSeconds);
+  if (entry) {
+    emitCacheEvent(
+      options,
+      context,
+      isNegativeStorageLayout(entry) ? "negative_hit" : "local_hit",
+      isNegativeStorageLayout(entry) ? entry.reason : undefined
+    );
+  }
+  if (!entry) {
+    entry = await getExternalLayout(options, context);
+    if (entry) {
+      if (isNegativeStorageLayout(entry)) {
+        setLocalNegative(balanceCache, context.key, entry, context.negativeTtlSeconds);
+        emitCacheEvent(options, context, "negative_hit", entry.reason);
+      } else {
+        setLocalLayout(balanceCache, context.key, entry, context.ttlSeconds);
+        emitCacheEvent(options, context, "external_hit");
+      }
+    }
+  }
+
+  if (
+    entry &&
+    isNegativeStorageLayout(entry) &&
+    entry.reason === "not-found" &&
+    (entry.maxSlots ?? 0) < maxSlots
+  ) {
+    // The failed search used a smaller probe budget than this caller; retry.
+    entry = undefined;
   }
 
   let discoveredBalance: ethers.BigNumber | undefined;
-  if (!layout) {
-    layout = await runVerifiedDiscovery(context.key, async () => {
+  if (!entry) {
+    // Scope in-flight sharing by holder and probe budget: a zero-balance
+    // outcome is holder-specific and must not leak to other holders.
+    const discoveryKey = `${context.key}:${holderAddress.toLowerCase()}:${maxSlots}`;
+    entry = await runVerifiedDiscovery(discoveryKey, async () => {
       const userBalance = await getErc20Balance(provider, erc20Address, holderAddress);
-      if (userBalance.eq(0)) throw new Error("User has no balance");
-      const discovered = await discoverBalanceLayout(
+      if (userBalance.eq(0)) {
+        // Holder-specific: a funded holder may verify this token at any time,
+        // so this outcome is shared with concurrent same-holder callers but never cached.
+        emitCacheEvent(options, context, "discovery_failed", "no-balance");
+        const marker: NegativeStorageLayout = {
+          status: "unverifiable", reason: "no-balance", failedAt: Date.now(),
+        };
+        return marker;
+      }
+      const { found, incomplete } = await discoverBalanceLayout(
         provider, erc20Address, holderAddress, userBalance, maxSlots
       );
-      if (!discovered) throw new Error("Unable to find balance slot");
-      discoveredBalance = discovered.balance;
-      setLocalLayout(balanceCache, context.key, discovered.layout, context.ttlSeconds);
-      await setExternalLayout(
-        options, context.key, discovered.layout, context.ttlSeconds, context.timeoutMs
-      );
-      return discovered.layout;
+      if (!found) {
+        if (incomplete) {
+          // Some probes failed (rate limit, provider error); the matching slot
+          // may be among them. Do not poison the negative cache.
+          return undefined;
+        }
+        const failedAt = Date.now();
+        const marker: NegativeStorageLayout = {
+          status: "unverifiable",
+          reason: "not-found",
+          failedAt,
+          expiresAt: failedAt + context.negativeTtlSeconds * 1000,
+          maxSlots,
+        };
+        setLocalNegative(balanceCache, context.key, marker, context.negativeTtlSeconds);
+        await setExternalLayout(options, context, marker, context.negativeTtlSeconds);
+        emitCacheEvent(options, context, "discovery_failed", "not-found");
+        return marker;
+      }
+      discoveredBalance = found.balance;
+      setLocalLayout(balanceCache, context.key, found.layout, context.ttlSeconds);
+      await setExternalLayout(options, context, found.layout, context.ttlSeconds);
+      emitCacheEvent(options, context, "verified");
+      return found.layout;
     });
   }
 
-  if (!layout) throw new Error("Unable to find balance slot");
+  if (!entry) throw new Error("Unable to find balance slot");
+  if (isNegativeStorageLayout(entry)) {
+    throw new Error(
+      entry.reason === "no-balance" ? "User has no balance" : "Unable to find balance slot"
+    );
+  }
+  const layout: VerifiedStorageLayout = entry;
   const storagePosition = layout.isVyper
     ? calculateBalanceVyperStorageSlot(holderAddress, layout.slot).vyperSlotHash
     : calculateBalanceSolidityStorageSlot(holderAddress, layout.slot).slotHash;
@@ -153,10 +222,14 @@ const discoverBalanceLayout = async (
   userBalance: ethers.BigNumber,
   maxSlots: number
 ): Promise<{
-  layout: VerifiedStorageLayout;
-  balance: ethers.BigNumber;
-} | undefined> => {
+  found?: {
+    layout: VerifiedStorageLayout;
+    balance: ethers.BigNumber;
+  };
+  incomplete: boolean;
+}> => {
   const batchSize = 2;
+  let incomplete = false;
   for (let start = 0; start < maxSlots; start += batchSize) {
     const candidates: Array<{ slot: number; isVyper: boolean; position: string }> = [];
     for (let slot = start; slot < Math.min(start + batchSize, maxSlots); slot++) {
@@ -176,19 +249,26 @@ const discoverBalanceLayout = async (
     ));
     for (let i = 0; i < candidates.length; i++) {
       const value = values[i];
-      if (value.status === "fulfilled" && ethers.BigNumber.from(value.value).eq(userBalance)) {
+      if (value.status === "rejected") {
+        // The matching slot may be among failed reads; the caller must treat
+        // an exhausted-but-incomplete search as transient, not "not-found".
+        incomplete = true;
+      } else if (ethers.BigNumber.from(value.value).eq(userBalance)) {
         return {
-          layout: {
-            slot: candidates[i].slot,
-            isVyper: candidates[i].isVyper,
-            verifiedAt: Date.now(),
+          found: {
+            layout: {
+              slot: candidates[i].slot,
+              isVyper: candidates[i].isVyper,
+              verifiedAt: Date.now(),
+            },
+            balance: ethers.BigNumber.from(value.value),
           },
-          balance: ethers.BigNumber.from(value.value),
+          incomplete: false,
         };
       }
     }
   }
-  return undefined;
+  return { found: undefined, incomplete };
 };
 
 
