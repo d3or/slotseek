@@ -57,7 +57,7 @@ export const generateMockBalanceData = async (
     tokenAddress,
     holderAddress,
     maxSlots,
-    cacheOptions
+    { ...cacheOptions, fallbackBalance: mockBalanceAmount }
   );
 
   // make sure its padded to 32 bytes, and convert to a BigNumber
@@ -109,7 +109,7 @@ export const getErc20BalanceStorageSlot = async (
   erc20Address: string,
   holderAddress: string,
   maxSlots = 30,
-  options: StorageLayoutCacheOptions = {}
+  options: StorageLayoutCacheOptions & { fallbackBalance?: string } = {}
 ): Promise<{
   slot: string;
   balance: ethers.BigNumber;
@@ -205,8 +205,10 @@ export const getErc20BalanceStorageSlot = async (
   const storagePosition = layout.isVyper
     ? calculateBalanceVyperStorageSlot(holderAddress, layout.slot).vyperSlotHash
     : calculateBalanceSolidityStorageSlot(holderAddress, layout.slot).slotHash;
-  const balance = discoveredBalance ?? await getStorageAtLimited(
-    provider, erc20Address, storagePosition
+  const balance = discoveredBalance ?? (
+    options.fallbackBalance !== undefined
+      ? options.fallbackBalance
+      : await getStorageAtLimited(provider, erc20Address, storagePosition)
   );
   return {
     slot: ethers.BigNumber.from(layout.slot).toHexString(),
