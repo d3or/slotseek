@@ -2,6 +2,7 @@ import { ethers } from "ethers";
 import {
   approvalCache,
   balanceCache,
+  generateMockBalanceData,
   getErc20ApprovalStorageSlot,
   getErc20BalanceStorageSlot,
   getStorageLayoutCacheKey,
@@ -77,6 +78,29 @@ describe("verified storage layout caching", () => {
 
     expect(result.balance.toNumber()).toBe(12);
     expect(storage).toHaveBeenCalledTimes(1);
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("skips the cached balance storage read when a mock amount is provided", async () => {
+    const rpc = provider();
+    const cache: StorageLayoutCacheAdapter = {
+      get: jest.fn().mockResolvedValue({ slot: 3, isVyper: false, verifiedAt: Date.now() }),
+      set: jest.fn(),
+    };
+    const storage = jest.spyOn(rpc, "getStorageAt");
+    const call = jest.spyOn(rpc, "call");
+
+    const result = await generateMockBalanceData(rpc, {
+      tokenAddress: token,
+      holderAddress: owner,
+      mockAddress: spender,
+      mockBalanceAmount: "12",
+      cache,
+      chainId: 1,
+    });
+
+    expect(result.balance).toBe(encoded(12));
+    expect(storage).not.toHaveBeenCalled();
     expect(call).not.toHaveBeenCalled();
   });
 
